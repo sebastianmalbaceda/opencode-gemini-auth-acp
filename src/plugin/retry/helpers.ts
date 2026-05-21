@@ -1,8 +1,8 @@
 import { parseRetryDelayFromBody } from "./quota";
 
 export const DEFAULT_MAX_ATTEMPTS = 3;
-const DEFAULT_INITIAL_DELAY_MS = 5000;
-const DEFAULT_MAX_DELAY_MS = 30000;
+const DEFAULT_INITIAL_DELAY_MS = 1000;
+const DEFAULT_MAX_DELAY_MS = 5000;
 
 const RETRYABLE_NETWORK_CODES = new Set([
   "ECONNRESET",
@@ -30,7 +30,10 @@ export function canRetryRequest(init: RequestInit | undefined): boolean {
   if (typeof body === "string") {
     return true;
   }
-  if (typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams) {
+  if (
+    typeof URLSearchParams !== "undefined" &&
+    body instanceof URLSearchParams
+  ) {
     return true;
   }
   if (typeof ArrayBuffer !== "undefined" && body instanceof ArrayBuffer) {
@@ -62,7 +65,10 @@ export function isRetryableNetworkError(error: unknown): boolean {
     return true;
   }
 
-  return error instanceof Error && error.message.toLowerCase().includes("fetch failed");
+  return (
+    error instanceof Error &&
+    error.message.toLowerCase().includes("fetch failed")
+  );
 }
 
 /**
@@ -73,7 +79,9 @@ export async function resolveRetryDelayMs(
   attempt: number,
   quotaDelayMs?: number,
 ): Promise<number> {
-  const retryAfterMsHeader = parseRetryAfterMs(response.headers.get("retry-after-ms"));
+  const retryAfterMsHeader = parseRetryAfterMs(
+    response.headers.get("retry-after-ms"),
+  );
   if (retryAfterMsHeader !== null) {
     return clampDelay(retryAfterMsHeader);
   }
@@ -96,7 +104,10 @@ export async function resolveRetryDelayMs(
 }
 
 export function getExponentialDelayWithJitter(attempt: number): number {
-  const base = Math.min(DEFAULT_MAX_DELAY_MS, DEFAULT_INITIAL_DELAY_MS * Math.pow(2, attempt - 1));
+  const base = Math.min(
+    DEFAULT_MAX_DELAY_MS,
+    DEFAULT_INITIAL_DELAY_MS * Math.pow(2, attempt - 1),
+  );
   const jitter = base * 0.3 * (Math.random() * 2 - 1);
   return clampDelay(base + jitter);
 }
@@ -112,7 +123,10 @@ function getNetworkErrorCode(error: unknown): string | undefined {
     if (!value || typeof value !== "object") {
       return undefined;
     }
-    if ("code" in value && typeof (value as { code?: unknown }).code === "string") {
+    if (
+      "code" in value &&
+      typeof (value as { code?: unknown }).code === "string"
+    ) {
       return (value as { code: string }).code;
     }
     return undefined;
