@@ -15,6 +15,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
+import { execSync } from "node:child_process";
 
 /**
  * Path to the Gemini CLI's OAuth credential store.
@@ -24,17 +25,7 @@ export function getGeminiOAuthCredsPath(): string {
 }
 
 /**
- * Path to the Gemini CLI's settings file.
- */
-export function getGeminiSettingsPath(): string {
-  return join(homedir(), ".gemini", "settings.json");
-}
-
-/**
  * Path to the installed @google/gemini-cli package.
- *
- * Uses well-known OS paths for npm's global node_modules directory.
- * No subprocess calls — 100% fast and reliable.
  */
 export function getGeminiCliPackagePath(): string {
   const globalNodeModules = getGlobalNodeModulesPath();
@@ -61,14 +52,11 @@ export interface GeminiOAuthAppCredentials {
  */
 export function readGeminiCredentials(): GeminiCliCredentials | null {
   const credsPath = getGeminiOAuthCredsPath();
-  if (!existsSync(credsPath)) {
-    return null;
-  }
+  if (!existsSync(credsPath)) return null;
 
   try {
     const raw = readFileSync(credsPath, "utf8");
     const parsed = JSON.parse(raw) as Record<string, unknown>;
-
     const accessToken =
       typeof parsed.access_token === "string" ? parsed.access_token : undefined;
     const refreshToken =
@@ -77,13 +65,10 @@ export function readGeminiCredentials(): GeminiCliCredentials | null {
         : undefined;
     const expiryDate =
       typeof parsed.expiry_date === "number" ? parsed.expiry_date : undefined;
-    const scope = typeof parsed.scope === "string" ? parsed.scope : undefined;
     const idToken =
       typeof parsed.id_token === "string" ? parsed.id_token : undefined;
 
-    if (!accessToken || !refreshToken) {
-      return null;
-    }
+    if (!accessToken || !refreshToken) return null;
 
     let email: string | undefined;
     if (idToken) {
@@ -96,7 +81,7 @@ export function readGeminiCredentials(): GeminiCliCredentials | null {
           email = typeof decoded.email === "string" ? decoded.email : undefined;
         }
       } catch {
-        // idToken parsing is best-effort
+        /* best-effort */
       }
     }
 
@@ -104,26 +89,16 @@ export function readGeminiCredentials(): GeminiCliCredentials | null {
       accessToken,
       refreshToken,
       expiryDate: expiryDate ?? Date.now(),
-      scope,
+      scope: typeof parsed.scope === "string" ? parsed.scope : undefined,
       email,
     };
-  } catch (error) {
-    console.warn("[Gemini CLI] Failed to read OAuth credentials:", error);
+  } catch {
     return null;
   }
 }
 
 /**
- * Checks whether the Gemini CLI has stored credentials.
- *
- * FAST: Only checks file existence — no subprocess calls.
- */
-export function isGeminiAuthenticated(): boolean {
-  return existsSync(getGeminiOAuthCredsPath());
-}
-
-/**
- * Checks if the access token is expired.
+ * Checks if the access token is expired (with buffer for clock skew).
  */
 export function isAccessTokenExpired(
   expiryDate: number,
@@ -133,25 +108,32 @@ export function isAccessTokenExpired(
 }
 
 /**
+ * Checks whether the Gemini CLI has stored credentials.
+ */
+export function isGeminiAuthenticated(): boolean {
+  return existsSync(getGeminiOAuthCredsPath());
+}
+
+/**
+ * Path to the Gemini CLI's settings file.
+ */
+export function getGeminiSettingsPath(): string {
+  return join(homedir(), ".gemini", "settings.json");
+}
+
+/**
  * Checks if the Gemini CLI is installed by looking for the npm package on disk.
- *
- * 100% synchronous file check — no subprocess, no execSync, no blocking.
  */
 export function isGeminiCliInstalled(): boolean {
-  const pkgPath = getGeminiCliPackagePath();
-  return existsSync(join(pkgPath, "package.json"));
+  return existsSync(join(getGeminiCliPackagePath(), "package.json"));
 }
 
 /**
  * Gets the current Gemini CLI version by reading the package.json.
- * No subprocess — pure synchronous JSON parse.
  */
 export function getGeminiCliVersion(): string | null {
-  const pkgPath = getGeminiCliPackagePath();
-  const pkgJsonPath = join(pkgPath, "package.json");
-  if (!existsSync(pkgJsonPath)) {
-    return null;
-  }
+  const pkgJsonPath = join(getGeminiCliPackagePath(), "package.json");
+  if (!existsSync(pkgJsonPath)) return null;
   try {
     const pkg = JSON.parse(readFileSync(pkgJsonPath, "utf8")) as {
       version?: string;
@@ -162,72 +144,74 @@ export function getGeminiCliVersion(): string | null {
   }
 }
 
-// Internal credential override used for testing.
-// When set, readGeminiAppCredentials returns this value instead of extracting from bundle.
+// Internal override for testing
 let _testCredentialOverride: GeminiOAuthAppCredentials | null | undefined;
 
-/**
- * Sets a credential override for testing.
- * Pass `null` to simulate CLI not found. Pass `undefined` to clear the override.
- */
 export function _setTestCredentialOverride(
   override: GeminiOAuthAppCredentials | null | undefined,
 ): void {
   _testCredentialOverride = override;
 }
 
+// Cache for extracted credentials
 let _cachedAppCredentials: GeminiOAuthAppCredentials | null | undefined;
 
 /**
  * Extracts the Gemini CLI's OAuth app credentials from the installed bundle.
  *
- * The @google/gemini-cli package ships with its own OAuth client credentials
- * for the official Gemini CLI OAuth app. Since the user explicitly installed
- * this package on their machine, reading these at runtime is legitimate —
- * unlike hardcoding them in our own distributed source code.
- *
- * Falls back to known values if the bundle can't be read at runtime.
+ * The @google/gemini-cli package bundles OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET
+ * as string literals. We read these at runtime from the locally installed CLI.
+ * Returns null if the CLI isn't installed or the bundle can't be read.
  */
 export function readGeminiAppCredentials(): GeminiOAuthAppCredentials | null {
-  // Allow test injection
-  if (_testCredentialOverride !== undefined) {
-    return _testCredentialOverride;
-  }
-
-  // Return cached value if previously extracted
-  if (_cachedAppCredentials !== undefined) {
-    return _cachedAppCredentials;
-  }
+  if (_testCredentialOverride !== undefined) return _testCredentialOverride;
+  if (_cachedAppCredentials !== undefined) return _cachedAppCredentials;
 
   try {
     const pkgPath = getGeminiCliPackagePath();
     const bundleDir = join(pkgPath, "bundle");
+    if (!existsSync(bundleDir)) {
+      _cachedAppCredentials = null;
+      return null;
+    }
 
-    if (existsSync(bundleDir)) {
-      const clientId = extractFromBundleFiles(
-        bundleDir,
-        [/681255809395/],
-        [/["'']client_id["''"]\s*[,:]\s*["'']([^"'']+)["''']/],
-      );
+    const files = readDirSafe(bundleDir);
+    let clientId: string | null = null;
+    let clientSecret: string | null = null;
 
-      const clientSecret = extractFromBundleFiles(
-        bundleDir,
-        [/GOCSPX/],
-        [/["'']client_secret["''"]\s*[,:]\s*["'']([^"'']+)["''']/],
-      );
+    for (const file of files) {
+      if (!file.endsWith(".js")) continue;
+      try {
+        const content = readFileSync(join(bundleDir, file), "utf8");
 
-      if (clientId && clientSecret) {
-        const creds: GeminiOAuthAppCredentials = {
-          clientId,
-          clientSecret,
-          redirectUri: "http://localhost:8085/oauth2callback",
-        };
-        _cachedAppCredentials = creds;
-        return creds;
+        if (!clientId) {
+          const idMatch = content.match(/OAUTH_CLIENT_ID\s*=\s*"([^"]+)"/);
+          if (idMatch?.[1]) clientId = idMatch[1];
+        }
+
+        if (!clientSecret) {
+          const secretMatch = content.match(
+            /OAUTH_CLIENT_SECRET\s*=\s*"([^"]+)"/,
+          );
+          if (secretMatch?.[1]) clientSecret = secretMatch[1];
+        }
+
+        if (clientId && clientSecret) break;
+      } catch {
+        /* skip unreadable files */
       }
     }
 
-    // No credentials found in bundle — CLI may not be installed
+    if (clientId && clientSecret) {
+      const creds: GeminiOAuthAppCredentials = {
+        clientId,
+        clientSecret,
+        redirectUri: "http://localhost:8085/oauth2callback",
+      };
+      _cachedAppCredentials = creds;
+      return creds;
+    }
+
     _cachedAppCredentials = null;
     return null;
   } catch {
@@ -236,34 +220,47 @@ export function readGeminiAppCredentials(): GeminiOAuthAppCredentials | null {
   }
 }
 
-function extractFromBundleFiles(
-  bundleDir: string,
-  searchPatterns: RegExp[],
-  extractPatterns: RegExp[],
-): string | null {
-  const files = readDirSafe(bundleDir);
-  for (const file of files) {
-    if (!file.endsWith(".js")) continue;
+/**
+ * Returns the global node_modules path based on the current OS.
+ */
+function getGlobalNodeModulesPath(): string {
+  const plat = platform();
+  const home = homedir();
 
-    try {
-      const content = readFileSync(join(bundleDir, file), "utf8");
-
-      // Quick check if any search pattern matches
-      const hasMatch = searchPatterns.some((pattern) => pattern.test(content));
-      if (!hasMatch) continue;
-
-      // Try to extract the value
-      for (const extractPattern of extractPatterns) {
-        const match = content.match(extractPattern);
-        if (match?.[1]) {
-          return match[1];
-        }
-      }
-    } catch {
-      continue;
+  // Try `npm root -g` first (fast subprocess)
+  try {
+    const result = execSync("npm root -g", {
+      timeout: 3000,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const prefix = result.trim();
+    if (
+      prefix &&
+      existsSync(join(prefix, "@google", "gemini-cli", "package.json"))
+    ) {
+      return prefix;
     }
+  } catch {
+    /* fall through */
   }
-  return null;
+
+  // OS-specific fallbacks
+  if (plat === "win32") {
+    return join(
+      process.env.APPDATA ?? join(home, "AppData", "Roaming"),
+      "npm",
+      "node_modules",
+    );
+  }
+  if (plat === "darwin") {
+    const homeNm = join(home, ".npm-global", "lib", "node_modules");
+    if (existsSync(homeNm)) return homeNm;
+    return "/usr/local/lib/node_modules";
+  }
+  const homeNm = join(home, ".npm-global", "lib", "node_modules");
+  if (existsSync(homeNm)) return homeNm;
+  return "/usr/lib/node_modules";
 }
 
 function readDirSafe(dir: string): string[] {
@@ -275,42 +272,4 @@ function readDirSafe(dir: string): string[] {
   }
 }
 
-/**
- * Returns the global node_modules path based on the current OS.
- * No subprocess calls — uses well-known OS conventions.
- */
-function getGlobalNodeModulesPath(): string {
-  const plat = platform();
-  const home = homedir();
-
-  if (plat === "win32") {
-    // Windows: %APPDATA%\npm\node_modules
-    return join(
-      process.env.APPDATA ?? join(home, "AppData", "Roaming"),
-      "npm",
-      "node_modules",
-    );
-  }
-
-  if (plat === "darwin") {
-    // macOS: /usr/local/lib/node_modules (homebrew) or ~/.npm-global/lib/node_modules
-    const homeNodeModules = join(home, ".npm-global", "lib", "node_modules");
-    if (existsSync(homeNodeModules)) {
-      return homeNodeModules;
-    }
-    return "/usr/local/lib/node_modules";
-  }
-
-  // Linux: check common paths
-  const homeNodeModules = join(home, ".npm-global", "lib", "node_modules");
-  if (existsSync(homeNodeModules)) {
-    return homeNodeModules;
-  }
-  return "/usr/lib/node_modules";
-}
-
-export const credentialInternals = {
-  getGlobalNodeModulesPath,
-  readDirSafe,
-  extractFromBundleFiles,
-};
+export const credentialInternals = { getGlobalNodeModulesPath, readDirSafe };
