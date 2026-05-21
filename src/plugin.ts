@@ -144,12 +144,9 @@ export const GeminiCLIOAuthPlugin = async ({
               latestGeminiUserAgentModel = requestUserAgentModel;
 
             // ─── Hybrid dispatch ───────────────────────────────
-            // Check if the request needs the full HTTP pipeline
+            // Try fast path first for simple chat, fall back to HTTP pipeline for complex requests
             const body = typeof init?.body === "string" ? init.body : "";
-            const needsFullPipeline = hasToolCallsOrThinking(body);
-
-            if (!needsFullPipeline && cliAuthenticated) {
-              // Simple chat → use fast gemini -p subprocess
+            if (!hasToolCalls(body)) {
               try {
                 const { userText, systemText } = extractSimpleChat(body);
                 if (userText) {
@@ -159,8 +156,12 @@ export const GeminiCLIOAuthPlugin = async ({
                   });
                   if (result.text) return buildSseResponse(result.text);
                 }
-              } catch {
-                /* fall through to HTTP pipeline */
+              } catch (fastErr) {
+                if (isGeminiDebugEnabled()) {
+                  logGeminiDebugMessage(
+                    `Fast path failed, falling back to HTTP pipeline: ${fastErr}`,
+                  );
+                }
               }
             }
 
@@ -241,21 +242,17 @@ const loggedQuotaModelsByProject = new Set<string>();
 
 // ─── Hybrid helpers ────────────────────────────────────────────
 
-function hasToolCallsOrThinking(body: string): boolean {
-  if (!body) return true; // can't determine, use full pipeline
+/** Only true if the request has actual tool definitions (not generationConfig). */
+function hasToolCalls(body: string): boolean {
+  if (!body) return false;
   try {
     const p = JSON.parse(body);
-    const req = p.request || p;
-    // Check for tool definitions
-    if (req.tools && Array.isArray(req.tools) && req.tools.length > 0)
-      return true;
+    const req = (p.request || p) as Record<string, unknown>;
+    if (Array.isArray(req.tools) && req.tools.length > 0) return true;
     if (req.tool_config) return true;
-    // Check for thinking config
-    if (req.generationConfig?.thinkingConfig) return true;
-    if (req.thinkingConfig) return true;
     return false;
   } catch {
-    return true;
+    return false;
   }
 }
 
