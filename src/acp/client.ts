@@ -125,8 +125,14 @@ export class AcpClient {
 
   private async handleClientRequest(
     method: string,
-    _params: unknown,
+    params: unknown,
   ): Promise<unknown> {
+    // session/update can arrive as EITHER a notification (no id) or a request (with id).
+    // Handle it in both cases so we never miss streaming content.
+    if (method === CLIENT_METHODS.sessionUpdate) {
+      this.handleSessionUpdate(params as SessionUpdateParams);
+      return {};
+    }
     switch (method) {
       case CLIENT_METHODS.fsReadTextFile:
         return { content: null };
