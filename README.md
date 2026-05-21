@@ -330,6 +330,23 @@ Unlike the original plugin, this version does NOT:
 - Gemini CLI npm package: `@google/gemini-cli`
 - Gemini CLI quota documentation: https://developers.google.com/gemini-code-assist/resources/quotas
 
+## Hybrid Mode & Performance
+
+To provide the best possible user experience while maintaining strict security standards, this plugin operates in a **Hybrid Mode**. It automatically selects the fastest compliant path for each request:
+
+- **Fast Path (~10s):** For simple chat requests (no tools or complex thinking required), the plugin invokes the local `gemini` CLI as a subprocess. This avoids the overhead of the full HTTP pipeline while remaining 100% ToS compliant.
+- **Full Pipeline (~60s):** For complex requests involving tool use, thinking models, or advanced generation configurations, the plugin uses the secure HTTP Code Assist API.
+
+### Why the latency?
+
+You may notice that requests through the Full Pipeline take longer than other providers. This is a deliberate trade-off:
+
+1.  **Security First:** All tokens are refreshed and validated through official Google OAuth channels.
+2.  **ToS Compliance:** By using the official Code Assist API and the Gemini CLI bridge, we ensure your account stays within Google's terms.
+3.  **Project Context:** The plugin performs additional checks to ensure your requests are correctly attributed to your Google Cloud project and quota buckets.
+
+By using this plugin, you are choosing a **safe, officially-aligned, and sustainable** way to use Gemini within Opencode.
+
 ### Updating
 
 Opencode does not automatically update plugins. To update to the latest version,
