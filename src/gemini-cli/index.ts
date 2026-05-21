@@ -30,4 +30,5 @@ export {
   type GeminiCliCredentials,
   type GeminiOAuthAppCredentials,
   credentialInternals,
+  _setTestCredentialOverride,
 } from "./credentials";

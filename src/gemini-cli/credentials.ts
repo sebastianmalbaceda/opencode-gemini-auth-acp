@@ -176,12 +176,7 @@ export function _setTestCredentialOverride(
   _testCredentialOverride = override;
 }
 
-const FALLBACK_CREDENTIALS: GeminiOAuthAppCredentials = {
-  clientId:
-    "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com",
-  clientSecret: "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",
-  redirectUri: "http://localhost:8085/oauth2callback",
-};
+let _cachedAppCredentials: GeminiOAuthAppCredentials | null | undefined;
 
 /**
  * Extracts the Gemini CLI's OAuth app credentials from the installed bundle.
@@ -199,12 +194,16 @@ export function readGeminiAppCredentials(): GeminiOAuthAppCredentials | null {
     return _testCredentialOverride;
   }
 
+  // Return cached value if previously extracted
+  if (_cachedAppCredentials !== undefined) {
+    return _cachedAppCredentials;
+  }
+
   try {
     const pkgPath = getGeminiCliPackagePath();
     const bundleDir = join(pkgPath, "bundle");
 
     if (existsSync(bundleDir)) {
-      // Search through bundle chunks for the OAuth client credentials.
       const clientId = extractFromBundleFiles(
         bundleDir,
         [/681255809395/],
@@ -218,19 +217,22 @@ export function readGeminiAppCredentials(): GeminiOAuthAppCredentials | null {
       );
 
       if (clientId && clientSecret) {
-        return {
+        const creds: GeminiOAuthAppCredentials = {
           clientId,
           clientSecret,
-          redirectUri: FALLBACK_CREDENTIALS.redirectUri,
+          redirectUri: "http://localhost:8085/oauth2callback",
         };
+        _cachedAppCredentials = creds;
+        return creds;
       }
     }
 
-    // Return fallback when bundle extraction fails or CLI isn't installed
-    return { ...FALLBACK_CREDENTIALS };
+    // No credentials found in bundle — CLI may not be installed
+    _cachedAppCredentials = null;
+    return null;
   } catch {
-    // Return fallback on any error
-    return { ...FALLBACK_CREDENTIALS };
+    _cachedAppCredentials = null;
+    return null;
   }
 }
 
