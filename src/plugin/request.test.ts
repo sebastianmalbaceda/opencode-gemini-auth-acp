@@ -33,7 +33,12 @@ describe("request helpers", () => {
       }),
     };
 
-    const result = prepareGeminiRequest(input, init, "token-123", "project-456");
+    const result = prepareGeminiRequest(
+      input,
+      init,
+      "token-123",
+      "project-456",
+    );
 
     expect(result.streaming).toBe(true);
     expect(typeof result.request).toBe("string");
@@ -45,19 +50,27 @@ describe("request helpers", () => {
     expect(headers.get("Authorization")).toBe("Bearer token-123");
     expect(headers.get("x-api-key")).toBeNull();
     expect(headers.get("x-goog-api-key")).toBeNull();
-    expect(headers.get("User-Agent")).toContain("GeminiCLI/");
-    expect(headers.get("User-Agent")).toContain("/gemini-3-flash-preview ");
+    expect(headers.get("User-Agent")).toContain("OpencodeGeminiAuth/");
     expect(headers.get("Accept")).toBe("text/event-stream");
     expect(headers.get("x-activity-request-id")).toBeTruthy();
 
-    const parsed = JSON.parse(result.init.body as string) as Record<string, unknown>;
+    const parsed = JSON.parse(result.init.body as string) as Record<
+      string,
+      unknown
+    >;
     expect(parsed.project).toBe("project-456");
     expect(parsed.model).toBe("gemini-3-flash-preview");
     expect(parsed.user_prompt_id).toBeTruthy();
-    expect(headers.get("x-activity-request-id")).not.toBe(parsed.user_prompt_id);
+    expect(headers.get("x-activity-request-id")).not.toBe(
+      parsed.user_prompt_id,
+    );
     expect((parsed.request as Record<string, unknown>).session_id).toBeTruthy();
-    expect((parsed.request as Record<string, unknown>).systemInstruction).toBeDefined();
-    expect((parsed.request as Record<string, unknown>).system_instruction).toBeUndefined();
+    expect(
+      (parsed.request as Record<string, unknown>).systemInstruction,
+    ).toBeDefined();
+    expect(
+      (parsed.request as Record<string, unknown>).system_instruction,
+    ).toBeUndefined();
   });
 
   it("drops thought-only model parts from replayed history", () => {
@@ -80,8 +93,16 @@ describe("request helpers", () => {
       }),
     };
 
-    const result = prepareGeminiRequest(input, init, "token-123", "project-456");
-    const parsed = JSON.parse(result.init.body as string) as Record<string, unknown>;
+    const result = prepareGeminiRequest(
+      input,
+      init,
+      "token-123",
+      "project-456",
+    );
+    const parsed = JSON.parse(result.init.body as string) as Record<
+      string,
+      unknown
+    >;
     const request = parsed.request as Record<string, unknown>;
     const contents = request.contents as Array<Record<string, unknown>>;
 
@@ -137,22 +158,34 @@ describe("request helpers", () => {
       }),
     };
 
-    const result = prepareGeminiRequest(input, init, "token-123", "project-456", {
-      models: {
-        "gemini-3-flash-preview": {
-          thinkingLevel: "HIGH",
-          includeThoughts: true,
+    const result = prepareGeminiRequest(
+      input,
+      init,
+      "token-123",
+      "project-456",
+      {
+        models: {
+          "gemini-3-flash-preview": {
+            thinkingLevel: "HIGH",
+            includeThoughts: true,
+          },
+        },
+        provider: {
+          thinkingLevel: "low",
+          includeThoughts: false,
         },
       },
-      provider: {
-        thinkingLevel: "low",
-        includeThoughts: false,
-      },
-    });
+    );
 
-    const parsed = JSON.parse(result.init.body as string) as Record<string, unknown>;
+    const parsed = JSON.parse(result.init.body as string) as Record<
+      string,
+      unknown
+    >;
     const request = parsed.request as Record<string, unknown>;
-    const generationConfig = request.generationConfig as Record<string, unknown>;
+    const generationConfig = request.generationConfig as Record<
+      string,
+      unknown
+    >;
     expect(generationConfig.thinkingConfig).toEqual({
       thinkingLevel: "high",
       includeThoughts: true,
@@ -178,22 +211,34 @@ describe("request helpers", () => {
       }),
     };
 
-    const result = prepareGeminiRequest(input, init, "token-123", "project-456", {
-      models: {
-        "gemini-3-flash-preview": {
+    const result = prepareGeminiRequest(
+      input,
+      init,
+      "token-123",
+      "project-456",
+      {
+        models: {
+          "gemini-3-flash-preview": {
+            thinkingLevel: "high",
+            includeThoughts: true,
+          },
+        },
+        provider: {
           thinkingLevel: "high",
           includeThoughts: true,
         },
       },
-      provider: {
-        thinkingLevel: "high",
-        includeThoughts: true,
-      },
-    });
+    );
 
-    const parsed = JSON.parse(result.init.body as string) as Record<string, unknown>;
+    const parsed = JSON.parse(result.init.body as string) as Record<
+      string,
+      unknown
+    >;
     const request = parsed.request as Record<string, unknown>;
-    const generationConfig = request.generationConfig as Record<string, unknown>;
+    const generationConfig = request.generationConfig as Record<
+      string,
+      unknown
+    >;
     expect(generationConfig.thinkingConfig).toEqual({
       thinkingLevel: "low",
       includeThoughts: false,
@@ -217,16 +262,28 @@ describe("request helpers", () => {
       }),
     };
 
-    const result = prepareGeminiRequest(input, init, "token-123", "project-456", {
-      provider: {
-        thinkingLevel: "high",
-        includeThoughts: false,
+    const result = prepareGeminiRequest(
+      input,
+      init,
+      "token-123",
+      "project-456",
+      {
+        provider: {
+          thinkingLevel: "high",
+          includeThoughts: false,
+        },
       },
-    });
+    );
 
-    const parsed = JSON.parse(result.init.body as string) as Record<string, unknown>;
+    const parsed = JSON.parse(result.init.body as string) as Record<
+      string,
+      unknown
+    >;
     const request = parsed.request as Record<string, unknown>;
-    const generationConfig = request.generationConfig as Record<string, unknown>;
+    const generationConfig = request.generationConfig as Record<
+      string,
+      unknown
+    >;
     expect(request.thinkingConfig).toBeUndefined();
     expect(generationConfig.thinkingConfig).toEqual({
       thinkingLevel: "low",

@@ -1,15 +1,20 @@
 import { GEMINI_PROVIDER_ID } from "./constants";
+import { isGeminiCliInstalled, isGeminiAuthenticated } from "./gemini-cli";
 import { geminiFetch } from "./fetch";
 import { createOAuthAuthorizeMethod } from "./plugin/oauth-authorize";
 import { accessTokenExpired, isOAuthAuth } from "./plugin/auth";
 import { resolveCachedAuth } from "./plugin/cache";
 import { ensureProjectContext, retrieveUserQuota } from "./plugin/project";
+import { createGeminiQuotaTool, GEMINI_QUOTA_TOOL_NAME } from "./plugin/quota";
 import {
-  createGeminiQuotaTool,
-  GEMINI_QUOTA_TOOL_NAME,
-} from "./plugin/quota";
-import { isGeminiDebugEnabled, logGeminiDebugMessage, startGeminiDebugRequest } from "./plugin/debug";
-import { maybeShowGeminiCapacityToast, maybeShowGeminiTestToast } from "./plugin/notify";
+  isGeminiDebugEnabled,
+  logGeminiDebugMessage,
+  startGeminiDebugRequest,
+} from "./plugin/debug";
+import {
+  maybeShowGeminiCapacityToast,
+  maybeShowGeminiTestToast,
+} from "./plugin/notify";
 import {
   resolveConfiguredProjectId,
   resolveConfiguredProjectIdFromClient,
@@ -45,15 +50,41 @@ let latestGeminiConfiguredProjectId: string | undefined;
 let latestGeminiUserAgentModel: string | undefined;
 
 /**
- * Registers the Gemini OAuth provider for Opencode, handling auth, request rewriting,
- * debug logging, and response normalization for Gemini Code Assist endpoints.
+ * Registers the Gemini provider for Opencode, handling auth via the Gemini CLI,
+ * request rewriting, debug logging, and response normalization.
  */
-export const GeminiCLIOAuthPlugin = async (
-  { client }: PluginContext,
-): Promise<PluginResult> => {
-  const resolveLatestConfiguredProjectId = async (provider?: Provider): Promise<string | undefined> => {
+export const GeminiCLIOAuthPlugin = async ({
+  client,
+}: PluginContext): Promise<PluginResult> => {
+  // Check if Gemini CLI is available
+  const cliInstalled = isGeminiCliInstalled();
+  const cliAuthenticated = cliInstalled && isGeminiAuthenticated();
+
+  if (!cliInstalled) {
+    console.warn(
+      "\n[Gemini Plugin] The Gemini CLI is not installed. " +
+        "This plugin requires the official Gemini CLI to handle authentication.\n" +
+        "Install it globally with: npm install -g @google/gemini-cli\n" +
+        "Then authenticate with: gemini auth login\n" +
+        "After that, restart Opencode.\n",
+    );
+  } else if (!cliAuthenticated) {
+    console.warn(
+      "\n[Gemini Plugin] Gemini CLI is installed but not authenticated.\n" +
+        "Run `gemini auth login` in your terminal, then restart Opencode.\n",
+    );
+  } else {
+    if (isGeminiDebugEnabled()) {
+      logGeminiDebugMessage("Gemini CLI detected and authenticated.");
+    }
+  }
+
+  const resolveLatestConfiguredProjectId = async (
+    provider?: Provider,
+  ): Promise<string | undefined> => {
     const configProjectId =
-      (await resolveConfiguredProjectIdFromClient(client)) ?? latestGeminiConfiguredProjectId;
+      (await resolveConfiguredProjectIdFromClient(client)) ??
+      latestGeminiConfiguredProjectId;
     const resolvedProjectId = resolveConfiguredProjectId({
       provider,
       configProjectId,
@@ -64,7 +95,8 @@ export const GeminiCLIOAuthPlugin = async (
 
   return {
     config: async (config) => {
-      latestGeminiConfiguredProjectId = resolveConfiguredProjectIdFromConfig(config);
+      latestGeminiConfiguredProjectId =
+        resolveConfiguredProjectIdFromConfig(config);
       config.command = config.command || {};
       config.command[GEMINI_QUOTA_COMMAND] = {
         description: "Show Gemini Code Assist quota usage",
@@ -81,7 +113,10 @@ export const GeminiCLIOAuthPlugin = async (
     },
     auth: {
       provider: GEMINI_PROVIDER_ID,
-      loader: async (getAuth: GetAuth, provider: Provider): Promise<LoaderResult | null> => {
+      loader: async (
+        getAuth: GetAuth,
+        provider: Provider,
+      ): Promise<LoaderResult | null> => {
         latestGeminiAuthResolver = getAuth;
         const auth = await getAuth();
         if (!isOAuthAuth(auth)) {
@@ -117,7 +152,8 @@ export const GeminiCLIOAuthPlugin = async (
               return geminiFetch(input, init);
             }
 
-            const configuredProjectId = await resolveLatestConfiguredProjectId(provider);
+            const configuredProjectId =
+              await resolveLatestConfiguredProjectId(provider);
             const requestTarget = parseGenerativeLanguageRequest(input);
             const requestUserAgentModel = requestTarget?.effectiveModel;
             if (requestUserAgentModel) {
@@ -129,7 +165,10 @@ export const GeminiCLIOAuthPlugin = async (
               configuredProjectId,
               requestUserAgentModel,
             );
-            await maybeShowGeminiTestToast(client, projectContext.effectiveProjectId);
+            await maybeShowGeminiTestToast(
+              client,
+              projectContext.effectiveProjectId,
+            );
             await maybeLogAvailableQuotaModels(
               authRecord.access,
               projectContext.effectiveProjectId,
@@ -156,7 +195,10 @@ export const GeminiCLIOAuthPlugin = async (
              * Retry transport/429 failures while preserving the requested model.
              * We intentionally do not auto-downgrade model tiers to avoid misleading users.
              */
-            const response = await fetchWithRetry(transformed.request, transformed.init);
+            const response = await fetchWithRetry(
+              transformed.request,
+              transformed.init,
+            );
             await maybeShowGeminiCapacityToast(
               client,
               response,
@@ -234,10 +276,13 @@ function normalizeProviderModelCosts(provider: Provider): void {
   }
 }
 
-function resolveThinkingConfigDefaults(provider: Provider): ThinkingConfigDefaults | undefined {
+function resolveThinkingConfigDefaults(
+  provider: Provider,
+): ThinkingConfigDefaults | undefined {
   const providerOptions =
     provider && typeof provider === "object"
-      ? ((provider as { options?: Record<string, unknown> }).options ?? undefined)
+      ? ((provider as { options?: Record<string, unknown> }).options ??
+        undefined)
       : undefined;
   const providerThinkingConfig = providerOptions?.thinkingConfig;
 
@@ -246,13 +291,21 @@ function resolveThinkingConfigDefaults(provider: Provider): ThinkingConfigDefaul
     if (!model || typeof model !== "object") {
       continue;
     }
-    const modelOptions = (model as { options?: Record<string, unknown> }).options;
-    if (modelOptions && typeof modelOptions === "object" && "thinkingConfig" in modelOptions) {
+    const modelOptions = (model as { options?: Record<string, unknown> })
+      .options;
+    if (
+      modelOptions &&
+      typeof modelOptions === "object" &&
+      "thinkingConfig" in modelOptions
+    ) {
       modelThinkingConfigByModel[modelId] = modelOptions.thinkingConfig;
     }
   }
 
-  if (providerThinkingConfig === undefined && Object.keys(modelThinkingConfigByModel).length === 0) {
+  if (
+    providerThinkingConfig === undefined &&
+    Object.keys(modelThinkingConfigByModel).length === 0
+  ) {
     return undefined;
   }
 
@@ -269,7 +322,12 @@ async function ensureProjectContextOrThrow(
   userAgentModel?: string,
 ) {
   try {
-    return await ensureProjectContext(authRecord, client, configuredProjectId, userAgentModel);
+    return await ensureProjectContext(
+      authRecord,
+      client,
+      configuredProjectId,
+      userAgentModel,
+    );
   } catch (error) {
     if (error instanceof Error) {
       console.error(error.message);
@@ -291,9 +349,6 @@ function toUrlString(value: RequestInfo): string {
 
 /**
  * Debug-only, best-effort model visibility log from Code Assist quota buckets.
- *
- * Why: it gives a concrete backend-side list of model IDs currently visible to the
- * current account/project, which helps explain 404/notFound model failures quickly.
  */
 async function maybeLogAvailableQuotaModels(
   accessToken: string,
@@ -311,13 +366,19 @@ async function maybeLogAvailableQuotaModels(
 
   const quota = await retrieveUserQuota(accessToken, projectId, userAgentModel);
   if (!quota?.buckets) {
-    logGeminiDebugMessage(`Code Assist quota model lookup returned no buckets for project: ${projectId}`);
+    logGeminiDebugMessage(
+      `Code Assist quota model lookup returned no buckets for project: ${projectId}`,
+    );
     return;
   }
 
-  const modelIds = [...new Set(quota.buckets.map((bucket) => bucket.modelId).filter(Boolean))];
+  const modelIds = [
+    ...new Set(quota.buckets.map((bucket) => bucket.modelId).filter(Boolean)),
+  ];
   if (modelIds.length === 0) {
-    logGeminiDebugMessage(`Code Assist quota buckets contained no model IDs for project: ${projectId}`);
+    logGeminiDebugMessage(
+      `Code Assist quota buckets contained no model IDs for project: ${projectId}`,
+    );
     return;
   }
 

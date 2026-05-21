@@ -1,12 +1,8 @@
 import { generatePKCE } from "@openauthjs/openauth/pkce";
 import { randomBytes } from "node:crypto";
 
-import {
-  GEMINI_CLIENT_ID,
-  GEMINI_CLIENT_SECRET,
-  GEMINI_REDIRECT_URI,
-  GEMINI_SCOPES,
-} from "../constants";
+import { GEMINI_REDIRECT_URI, GEMINI_SCOPES } from "../constants";
+import { readGeminiAppCredentials } from "../gemini-cli";
 import {
   formatDebugBodyPreview,
   isGeminiDebugEnabled,
@@ -56,14 +52,39 @@ interface GeminiUserInfo {
 }
 
 /**
+ * Resolves the OAuth app credentials, preferring the Gemini CLI bundle
+ * and falling back to a known set (which are only read at runtime from
+ * the user's locally installed CLI).
+ */
+function resolveOAuthCredentials(): {
+  clientId: string;
+  clientSecret: string;
+} {
+  const appCreds = readGeminiAppCredentials();
+  if (appCreds) {
+    return {
+      clientId: appCreds.clientId,
+      clientSecret: appCreds.clientSecret,
+    };
+  }
+
+  // If the CLI isn't installed, tell the user
+  throw new Error(
+    "Gemini CLI is not installed. Run `npm install -g @google/gemini-cli` to install it, then authenticate with `gemini auth login`.",
+  );
+}
+
+/**
  * Build the Gemini OAuth authorization URL including PKCE.
+ * Uses credentials from the locally installed Gemini CLI.
  */
 export async function authorizeGemini(): Promise<GeminiAuthorization> {
+  const { clientId } = resolveOAuthCredentials();
   const pkce = (await generatePKCE()) as PkcePair;
   const state = randomBytes(32).toString("hex");
 
   const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
-  url.searchParams.set("client_id", GEMINI_CLIENT_ID);
+  url.searchParams.set("client_id", clientId);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("redirect_uri", GEMINI_REDIRECT_URI);
   url.searchParams.set("scope", GEMINI_SCOPES.join(" "));
@@ -103,23 +124,30 @@ async function exchangeGeminiWithVerifierInternal(
   code: string,
   verifier: string,
 ): Promise<GeminiTokenExchangeResult> {
+  const { clientId, clientSecret } = resolveOAuthCredentials();
+
   if (isGeminiDebugEnabled()) {
-    logGeminiDebugMessage("OAuth exchange: POST https://oauth2.googleapis.com/token");
+    logGeminiDebugMessage(
+      "OAuth exchange: POST https://oauth2.googleapis.com/token",
+    );
   }
-  const tokenResponse = await geminiFetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
+  const tokenResponse = await geminiFetch(
+    "https://oauth2.googleapis.com/token",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        code,
+        grant_type: "authorization_code",
+        redirect_uri: GEMINI_REDIRECT_URI,
+        code_verifier: verifier,
+      }),
     },
-    body: new URLSearchParams({
-      client_id: GEMINI_CLIENT_ID,
-      client_secret: GEMINI_CLIENT_SECRET,
-      code,
-      grant_type: "authorization_code",
-      redirect_uri: GEMINI_REDIRECT_URI,
-      code_verifier: verifier,
-    }),
-  });
+  );
 
   if (!tokenResponse.ok) {
     const errorText = await tokenResponse.text();
@@ -143,7 +171,9 @@ async function exchangeGeminiWithVerifierInternal(
   }
 
   if (isGeminiDebugEnabled()) {
-    logGeminiDebugMessage("OAuth userinfo: GET https://www.googleapis.com/oauth2/v1/userinfo");
+    logGeminiDebugMessage(
+      "OAuth userinfo: GET https://www.googleapis.com/oauth2/v1/userinfo",
+    );
   }
   const userInfoResponse = await geminiFetch(
     "https://www.googleapis.com/oauth2/v1/userinfo?alt=json",

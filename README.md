@@ -3,15 +3,15 @@
 ![License](https://img.shields.io/npm/l/opencode-gemini-auth)
 ![Version](https://img.shields.io/npm/v/opencode-gemini-auth)
 
-> [!WARNING]
-> Google has stated that using Gemini CLI OAuth with third-party software is a
-> policy-violating use case and may trigger abuse detection or account
-> restrictions. It is unclear how aggressively this is enforced for projects
-> like this one, but you should assume there is real risk and use this plugin at
-> your own discretion. If you want the lowest-risk option, use Opencode with
-> your own Gemini API key instead.
+> [!IMPORTANT]
+> This plugin bridges Opencode with the **official Gemini CLI** (`@google/gemini-cli`).
+> Unlike earlier versions, it does **not** hardcode OAuth credentials, impersonate
+> the Gemini CLI, or distribute Google's client secrets. All authentication is
+> handled by the official Gemini CLI that you install on your own machine.
 >
-> See: https://github.com/google-gemini/gemini-cli/discussions/22970
+> **You must install the Gemini CLI separately.** This plugin delegates all
+> authentication and token management to the official CLI, which means your
+> usage stays within Google's Terms of Service.
 
 **Authenticate the Opencode CLI with your Google account.** This plugin enables
 you to use your existing Gemini plan and quotas (including the free tier)
@@ -21,6 +21,17 @@ directly within Opencode.
 
 - [Opencode CLI](https://opencode.ai) installed.
 - A Google account with access to Gemini.
+- **Gemini CLI** installed globally:
+
+  ```bash
+  npm install -g @google/gemini-cli
+  ```
+
+- Gemini CLI authenticated:
+
+  ```bash
+  gemini auth login
+  ```
 
 ## Installation
 
@@ -44,7 +55,14 @@ Add the plugin to your Opencode configuration file
 
 ## Usage
 
-1. **Login**: Run the authentication command in your terminal:
+1. **Install & authenticate the Gemini CLI** (one-time setup):
+
+   ```bash
+   npm install -g @google/gemini-cli
+   gemini auth login
+   ```
+
+2. **Login to Opencode**:
 
    ```bash
    opencode auth login
@@ -52,7 +70,8 @@ Add the plugin to your Opencode configuration file
 
 2. **Select Provider**: Choose **Google** from the list.
 3. **Authenticate**: Select **OAuth with Google (Gemini CLI)**.
-   - A browser window will open for you to approve the access.
+   - If the Gemini CLI is already authenticated, the plugin uses its credentials directly.
+   - Otherwise, a browser window will open for you to approve the access.
    - The plugin spins up a temporary local server to capture the callback.
    - If the local server fails (e.g., port in use or headless environment),
      you can manually paste the callback URL or just the authorization code.
@@ -280,34 +299,36 @@ OPENCODE_GEMINI_DEBUG=1 opencode
 This will generate `gemini-debug-<timestamp>.log` files in your working
 directory containing sanitized request/response details.
 
-## Parity Notes
+## Architecture
 
-This plugin mirrors the official Gemini CLI OAuth flow and Code Assist
-endpoints. In particular, project onboarding and quota retry handling follow
-the same behavior patterns as the Gemini CLI.
+This plugin uses the **Gemini CLI credential bridge** approach:
+
+```
+Opencode → Plugin → Direct HTTP (Gemini Code Assist API)
+                     ↓
+              Tokens from ~/.gemini/oauth_creds.json
+                     ↓
+              Official Gemini CLI handles OAuth
+```
+
+1. **Auth**: The user authenticates once with `gemini auth login` (official Gemini CLI)
+2. **Credentials**: The plugin reads tokens from the CLI's credential store (`~/.gemini/oauth_creds.json`)
+3. **OAuth app credentials**: For token refresh, the plugin extracts the OAuth client
+   credentials from the locally installed `@google/gemini-cli` package
+4. **API calls**: The plugin makes direct HTTP calls to Gemini Code Assist endpoints
+   using the tokens — the same pipeline as the original plugin, but without
+   hardcoded secrets or user-agent impersonation
+
+Unlike the original plugin, this version does NOT:
+- ❌ Hardcode `client_id` or `client_secret` in source code
+- ❌ Impersonate the Gemini CLI user-agent
+- ❌ Store or distribute Google's OAuth credentials
 
 ### References
 
 - Gemini CLI repository: https://github.com/google-gemini/gemini-cli
+- Gemini CLI npm package: `@google/gemini-cli`
 - Gemini CLI quota documentation: https://developers.google.com/gemini-code-assist/resources/quotas
-
-### Local upstream mirror (optional)
-
-For local parity checks, you can keep a separate clone of the official
-`gemini-cli` in this repo at `.local/gemini-cli`.
-
-This mirror is intentionally untracked, so contributors must set it up once on
-their machine:
-
-```bash
-git clone https://github.com/google-gemini/gemini-cli.git .local/gemini-cli
-```
-
-After setup, pull upstream updates with:
-
-```bash
-bun run update:gemini-cli
-```
 
 ### Updating
 

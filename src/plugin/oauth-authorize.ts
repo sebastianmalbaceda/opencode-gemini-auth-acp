@@ -2,6 +2,11 @@ import { spawn } from "node:child_process";
 
 import { authorizeGemini, exchangeGeminiWithVerifier } from "../gemini/oauth";
 import type { GeminiTokenExchangeResult } from "../gemini/oauth";
+import {
+  readGeminiCredentials,
+  isGeminiCliInstalled,
+  isGeminiAuthenticated,
+} from "../gemini-cli";
 import { isGeminiDebugEnabled, logGeminiDebugMessage } from "./debug";
 import { resolveProjectContextFromAccessToken } from "./project";
 import { resolveConfiguredProjectId } from "./provider";
@@ -10,17 +15,86 @@ import type { OAuthAuthDetails } from "./types";
 
 /**
  * Builds the OAuth authorize callback used by plugin auth methods.
+ *
+ * If the Gemini CLI is already authenticated, we skip the full OAuth flow
+ * and read credentials from the CLI's local store. Otherwise, we fall back
+ * to the standard OAuth flow using credentials from the installed CLI.
  */
 export function createOAuthAuthorizeMethod(options?: {
-  getConfiguredProjectId?: () => Promise<string | undefined> | string | undefined;
+  getConfiguredProjectId?: () =>
+    | Promise<string | undefined>
+    | string
+    | undefined;
   getUserAgentModel?: () => Promise<string | undefined> | string | undefined;
 }): () => Promise<{
   url: string;
   instructions: string;
   method: string;
-  callback: (() => Promise<GeminiTokenExchangeResult>) | ((callbackUrl: string) => Promise<GeminiTokenExchangeResult>);
+  callback:
+    | (() => Promise<GeminiTokenExchangeResult>)
+    | ((callbackUrl: string) => Promise<GeminiTokenExchangeResult>);
 }> {
   return async () => {
+    // If the Gemini CLI is already authenticated, use its credentials directly
+    if (isGeminiCliInstalled() && isGeminiAuthenticated()) {
+      const creds = readGeminiCredentials();
+      if (creds) {
+        if (isGeminiDebugEnabled()) {
+          logGeminiDebugMessage(
+            `Using existing Gemini CLI credentials (expires at ${new Date(creds.expiryDate).toISOString()})`,
+          );
+        }
+
+        // Try to hydrate project context if possible
+        return {
+          url: "",
+          instructions:
+            "Using existing Gemini CLI credentials. No browser auth needed.",
+          method: "auto",
+          callback: async (): Promise<GeminiTokenExchangeResult> => {
+            const result: GeminiTokenExchangeResult = {
+              type: "success",
+              refresh: creds.refreshToken,
+              access: creds.accessToken,
+              expires: creds.expiryDate,
+              email: creds.email,
+            };
+
+            try {
+              const configuredProjectId = resolveConfiguredProjectId({
+                configProjectId: await options?.getConfiguredProjectId?.(),
+              });
+
+              const authSnapshot = {
+                type: "oauth",
+                refresh: creds.refreshToken,
+                access: creds.accessToken,
+                expires: creds.expiryDate,
+              } satisfies OAuthAuthDetails;
+              const projectContext = await resolveProjectContextFromAccessToken(
+                authSnapshot,
+                creds.accessToken,
+                configuredProjectId,
+                undefined,
+                await options?.getUserAgentModel?.(),
+              );
+              return projectContext.auth.refresh !== creds.refreshToken
+                ? { ...result, refresh: projectContext.auth.refresh }
+                : result;
+            } catch {
+              return result;
+            }
+          },
+        };
+      }
+    }
+
+    // Fallback: spawn the full OAuth flow using credentials from the installed CLI
+    console.log(
+      "Gemini CLI authentication required. A browser window will open for you to sign in.\n" +
+        "If you prefer, you can also run `gemini auth login` in your terminal first, then restart Opencode.",
+    );
+
     const maybeHydrateProjectId = async (
       result: GeminiTokenExchangeResult,
     ): Promise<GeminiTokenExchangeResult> => {
@@ -47,7 +121,10 @@ export function createOAuthAuthorizeMethod(options?: {
           await options?.getUserAgentModel?.(),
         );
 
-        if (projectContext.auth.refresh !== result.refresh && isGeminiDebugEnabled()) {
+        if (
+          projectContext.auth.refresh !== result.refresh &&
+          isGeminiDebugEnabled()
+        ) {
           logGeminiDebugMessage(
             `OAuth project resolved during auth: ${projectContext.effectiveProjectId || "none"}`,
           );
@@ -57,7 +134,8 @@ export function createOAuthAuthorizeMethod(options?: {
           : result;
       } catch (error) {
         if (isGeminiDebugEnabled()) {
-          const message = error instanceof Error ? error.message : String(error);
+          const message =
+            error instanceof Error ? error.message : String(error);
           console.warn(`[Gemini OAuth] Project resolution skipped: ${message}`);
         }
         return result;
@@ -103,7 +181,8 @@ export function createOAuthAuthorizeMethod(options?: {
             while (true) {
               const callbackUrl = await listener.waitForCallback();
               const callbackError = callbackUrl.searchParams.get("error");
-              const callbackErrorDescription = callbackUrl.searchParams.get("error_description");
+              const callbackErrorDescription =
+                callbackUrl.searchParams.get("error_description");
               if (callbackError) {
                 return {
                   type: "failed",
@@ -118,15 +197,22 @@ export function createOAuthAuthorizeMethod(options?: {
               }
               if (state !== authorization.state) {
                 if (isGeminiDebugEnabled()) {
-                  logGeminiDebugMessage("Ignoring OAuth callback with mismatched state");
+                  logGeminiDebugMessage(
+                    "Ignoring OAuth callback with mismatched state",
+                  );
                 }
                 continue;
               }
 
-              const exchangeResult = await exchangeGeminiWithVerifier(code, authorization.verifier);
+              const exchangeResult = await exchangeGeminiWithVerifier(
+                code,
+                authorization.verifier,
+              );
               if (shouldIgnoreMalformedAuthCode(exchangeResult)) {
                 if (isGeminiDebugEnabled()) {
-                  logGeminiDebugMessage("Ignoring malformed OAuth callback code and waiting for the next redirect");
+                  logGeminiDebugMessage(
+                    "Ignoring malformed OAuth callback code and waiting for the next redirect",
+                  );
                 }
                 continue;
               }
@@ -151,14 +237,22 @@ export function createOAuthAuthorizeMethod(options?: {
       instructions:
         "Complete OAuth in your browser, then paste the full redirected URL (e.g., http://localhost:8085/oauth2callback?code=...&state=...) or just the authorization code.",
       method: "code",
-      callback: async (callbackUrl: string): Promise<GeminiTokenExchangeResult> => {
+      callback: async (
+        callbackUrl: string,
+      ): Promise<GeminiTokenExchangeResult> => {
         try {
           const { code, state } = parseOAuthCallbackInput(callbackUrl);
           if (!code) {
-            return { type: "failed", error: "Missing authorization code in callback input" };
+            return {
+              type: "failed",
+              error: "Missing authorization code in callback input",
+            };
           }
           if (state && state !== authorization.state) {
-            return { type: "failed", error: "State mismatch in callback input (possible CSRF attempt)" };
+            return {
+              type: "failed",
+              error: "State mismatch in callback input (possible CSRF attempt)",
+            };
           }
           return await maybeHydrateProjectId(
             await exchangeGeminiWithVerifier(code, authorization.verifier),
@@ -174,7 +268,10 @@ export function createOAuthAuthorizeMethod(options?: {
   };
 }
 
-function parseOAuthCallbackInput(input: string): { code?: string; state?: string } {
+function parseOAuthCallbackInput(input: string): {
+  code?: string;
+  state?: string;
+} {
   const trimmed = input.trim();
   if (!trimmed) {
     return {};
@@ -209,8 +306,13 @@ function openBrowserUrl(url: string): void {
   try {
     const platform = process.platform;
     const command =
-      platform === "darwin" ? "open" : platform === "win32" ? "rundll32" : "xdg-open";
-    const args = platform === "win32" ? ["url.dll,FileProtocolHandler", url] : [url];
+      platform === "darwin"
+        ? "open"
+        : platform === "win32"
+          ? "rundll32"
+          : "xdg-open";
+    const args =
+      platform === "win32" ? ["url.dll,FileProtocolHandler", url] : [url];
     const child = spawn(command, args, {
       stdio: "ignore",
       detached: true,
@@ -219,10 +321,15 @@ function openBrowserUrl(url: string): void {
   } catch {}
 }
 
-function shouldIgnoreMalformedAuthCode(result: GeminiTokenExchangeResult): boolean {
+function shouldIgnoreMalformedAuthCode(
+  result: GeminiTokenExchangeResult,
+): boolean {
   if (result.type !== "failed") {
     return false;
   }
 
-  return /invalid_grant/i.test(result.error) && /malformed auth code/i.test(result.error);
+  return (
+    /invalid_grant/i.test(result.error) &&
+    /malformed auth code/i.test(result.error)
+  );
 }

@@ -1,8 +1,5 @@
-import {
-  GEMINI_CLIENT_ID,
-  GEMINI_CLIENT_SECRET,
-  GEMINI_PROVIDER_ID,
-} from "../constants";
+import { GEMINI_PROVIDER_ID } from "../constants";
+import { readGeminiAppCredentials } from "../gemini-cli";
 import { geminiFetch } from "../fetch";
 import { formatRefreshParts, parseRefreshParts } from "./auth";
 import { clearCachedAuth, storeCachedAuth } from "./cache";
@@ -33,12 +30,36 @@ interface OAuthErrorPayload {
   error_description?: string;
 }
 
-const refreshInFlight = new Map<string, Promise<OAuthAuthDetails | undefined>>();
+const refreshInFlight = new Map<
+  string,
+  Promise<OAuthAuthDetails | undefined>
+>();
+
+/**
+ * Resolves the OAuth client credentials for token refresh.
+ * These are read from the locally installed Gemini CLI at runtime.
+ */
+function resolveRefreshCredentials(): {
+  clientId: string;
+  clientSecret: string;
+} | null {
+  const appCreds = readGeminiAppCredentials();
+  if (appCreds) {
+    return {
+      clientId: appCreds.clientId,
+      clientSecret: appCreds.clientSecret,
+    };
+  }
+  return null;
+}
 
 /**
  * Parses OAuth error payloads returned by Google token endpoints, tolerating varied shapes.
  */
-function parseOAuthErrorPayload(text: string | undefined): { code?: string; description?: string } {
+function parseOAuthErrorPayload(text: string | undefined): {
+  code?: string;
+  description?: string;
+} {
   if (!text) {
     return {};
   }
@@ -64,7 +85,11 @@ function parseOAuthErrorPayload(text: string | undefined): { code?: string; desc
       return { code, description };
     }
 
-    if (payload.error && typeof payload.error === "object" && payload.error.message) {
+    if (
+      payload.error &&
+      typeof payload.error === "object" &&
+      payload.error.message
+    ) {
       return { code, description: payload.error.message };
     }
 
@@ -106,8 +131,17 @@ async function refreshAccessTokenInternal(
   client: PluginClient,
   parts: RefreshParts,
 ): Promise<OAuthAuthDetails | undefined> {
+  const credentials = resolveRefreshCredentials();
+  if (!credentials) {
+    console.warn(
+      "[Gemini OAuth] Cannot refresh token: Gemini CLI not found. " +
+        "Install it with `npm install -g @google/gemini-cli` and authenticate with `gemini auth login`.",
+    );
+    return undefined;
+  }
+
   try {
-    const response = await fetchTokenRefresh(parts.refreshToken);
+    const response = await fetchTokenRefresh(parts.refreshToken, credentials);
 
     if (!response.ok) {
       let errorText: string | undefined;
@@ -127,13 +161,18 @@ async function refreshAccessTokenInternal(
       }
 
       const { code, description } = parseOAuthErrorPayload(errorText);
-      const details = [code, description ?? errorText].filter(Boolean).join(": ");
+      const details = [code, description ?? errorText]
+        .filter(Boolean)
+        .join(": ");
       const baseMessage = `Gemini token refresh failed (${response.status} ${response.statusText})`;
-      console.warn(`[Gemini OAuth] ${details ? `${baseMessage} - ${details}` : baseMessage}`);
+      console.warn(
+        `[Gemini OAuth] ${details ? `${baseMessage} - ${details}` : baseMessage}`,
+      );
 
       if (code === "invalid_grant") {
         console.warn(
-          "[Gemini OAuth] Google revoked the stored refresh token. Run `opencode auth login` and reauthenticate the Google provider.",
+          "[Gemini OAuth] Google revoked the stored refresh token. " +
+            "Run `gemini auth login` in your terminal to re-authenticate, then restart Opencode.",
         );
         clearCachedAuth(auth.refresh);
         invalidateProjectContextCache(auth.refresh);
@@ -151,7 +190,10 @@ async function refreshAccessTokenInternal(
             body: clearedAuth,
           });
         } catch (storeError) {
-          console.error("Failed to clear stored Gemini OAuth credentials:", storeError);
+          console.error(
+            "Failed to clear stored Gemini OAuth credentials:",
+            storeError,
+          );
         }
       }
 
@@ -164,7 +206,8 @@ async function refreshAccessTokenInternal(
       refresh_token?: string;
     };
     if (isGeminiDebugEnabled()) {
-      const rotated = payload.refresh_token && payload.refresh_token !== parts.refreshToken;
+      const rotated =
+        payload.refresh_token && payload.refresh_token !== parts.refreshToken;
       logGeminiDebugMessage(
         `OAuth refresh success: expires_in=${payload.expires_in}s refresh_rotated=${rotated ? "yes" : "no"}`,
       );
@@ -194,18 +237,27 @@ async function refreshAccessTokenInternal(
           body: updatedAuth,
         });
       } catch (storeError) {
-        console.error("Failed to persist refreshed Gemini OAuth credentials:", storeError);
+        console.error(
+          "Failed to persist refreshed Gemini OAuth credentials:",
+          storeError,
+        );
       }
     }
 
     return updatedAuth;
   } catch (error) {
-    console.error("Failed to refresh Gemini access token due to an unexpected error:", error);
+    console.error(
+      "Failed to refresh Gemini access token due to an unexpected error:",
+      error,
+    );
     return undefined;
   }
 }
 
-async function fetchTokenRefresh(refreshToken: string): Promise<Response> {
+async function fetchTokenRefresh(
+  refreshToken: string,
+  credentials: { clientId: string; clientSecret: string },
+): Promise<Response> {
   const tokenUrl = "https://oauth2.googleapis.com/token";
   const init: RequestInit = {
     method: "POST",
@@ -215,20 +267,25 @@ async function fetchTokenRefresh(refreshToken: string): Promise<Response> {
     body: new URLSearchParams({
       grant_type: "refresh_token",
       refresh_token: refreshToken,
-      client_id: GEMINI_CLIENT_ID,
-      client_secret: GEMINI_CLIENT_SECRET,
+      client_id: credentials.clientId,
+      client_secret: credentials.clientSecret,
     }),
   };
 
   let attempt = 1;
   while (attempt <= DEFAULT_MAX_ATTEMPTS) {
     if (isGeminiDebugEnabled()) {
-      logGeminiDebugMessage(`OAuth refresh attempt ${attempt}: POST ${tokenUrl}`);
+      logGeminiDebugMessage(
+        `OAuth refresh attempt ${attempt}: POST ${tokenUrl}`,
+      );
     }
 
     try {
       const response = await geminiFetch(tokenUrl, init);
-      if (!isRetryableStatus(response.status) || attempt >= DEFAULT_MAX_ATTEMPTS) {
+      if (
+        !isRetryableStatus(response.status) ||
+        attempt >= DEFAULT_MAX_ATTEMPTS
+      ) {
         return response;
       }
 

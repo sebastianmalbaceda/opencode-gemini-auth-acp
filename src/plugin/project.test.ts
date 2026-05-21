@@ -42,7 +42,8 @@ describe("resolveProjectContextFromAccessToken", () => {
       }
       throw new Error(`Unexpected fetch to ${url}`);
     });
-    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+    (globalThis as { fetch: typeof fetch }).fetch =
+      fetchMock as unknown as typeof fetch;
 
     const result = await resolveProjectContextFromAccessToken(
       baseAuth,
@@ -55,8 +56,7 @@ describe("resolveProjectContextFromAccessToken", () => {
     expect(result.effectiveProjectId).toBe("projects/server-project");
     expect(result.auth.refresh).toContain("projects/server-project");
     expect(fetchMock.mock.calls.length).toBe(1);
-    expect(loadHeaders?.get("User-Agent")).toContain("GeminiCLI/");
-    expect(loadHeaders?.get("User-Agent")).toContain("/gemini-3-flash-preview ");
+    expect(loadHeaders?.get("User-Agent")).toContain("OpencodeGeminiAuth/");
     expect(loadHeaders?.get("x-activity-request-id")).toBeTruthy();
     expect(loadHeaders?.get("Client-Metadata")).toBeNull();
     expect(loadHeaders?.get("X-Goog-Api-Client")).toBeNull();
@@ -89,7 +89,8 @@ describe("resolveProjectContextFromAccessToken", () => {
       }
       throw new Error(`Unexpected fetch to ${url}`);
     });
-    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+    (globalThis as { fetch: typeof fetch }).fetch =
+      fetchMock as unknown as typeof fetch;
 
     const result = await resolveProjectContextFromAccessToken(
       baseAuth,
@@ -102,9 +103,11 @@ describe("resolveProjectContextFromAccessToken", () => {
     expect(result.effectiveProjectId).toBe("managed-project");
     expect(result.auth.refresh).toContain("managed-project");
     expect(onboardBody?.cloudaicompanionProject).toBeUndefined();
-    const metadata = onboardBody?.metadata as Record<string, unknown> | undefined;
+    const metadata = onboardBody?.metadata as
+      | Record<string, unknown>
+      | undefined;
     expect(metadata?.duetProject).toBeUndefined();
-    expect(onboardHeaders?.get("User-Agent")).toContain("/gemini-3-flash-preview ");
+    expect(onboardHeaders?.get("User-Agent")).toContain("OpencodeGeminiAuth/");
     expect(onboardHeaders?.get("x-activity-request-id")).toBeTruthy();
   });
 
@@ -121,7 +124,8 @@ describe("resolveProjectContextFromAccessToken", () => {
       }
       throw new Error(`Unexpected fetch to ${url}`);
     });
-    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+    (globalThis as { fetch: typeof fetch }).fetch =
+      fetchMock as unknown as typeof fetch;
 
     await expect(
       resolveProjectContextFromAccessToken(baseAuth, baseAuth.access ?? ""),
@@ -160,7 +164,8 @@ describe("resolveProjectContextFromAccessToken", () => {
       }
       throw new Error(`Unexpected fetch to ${url}`);
     });
-    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+    (globalThis as { fetch: typeof fetch }).fetch =
+      fetchMock as unknown as typeof fetch;
 
     const result = await resolveProjectContextFromAccessToken(
       baseAuth,
@@ -193,10 +198,15 @@ describe("resolveProjectContextFromAccessToken", () => {
       }
       throw new Error(`Unexpected fetch to ${url}`);
     });
-    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+    (globalThis as { fetch: typeof fetch }).fetch =
+      fetchMock as unknown as typeof fetch;
 
     await expect(
-      resolveProjectContextFromAccessToken(baseAuth, baseAuth.access ?? "", "configured-project"),
+      resolveProjectContextFromAccessToken(
+        baseAuth,
+        baseAuth.access ?? "",
+        "configured-project",
+      ),
     ).rejects.toThrow("Complete validation: https://example.com/verify");
   });
 
@@ -224,7 +234,8 @@ describe("resolveProjectContextFromAccessToken", () => {
       }
       throw new Error(`Unexpected fetch to ${url}`);
     });
-    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+    (globalThis as { fetch: typeof fetch }).fetch =
+      fetchMock as unknown as typeof fetch;
 
     const result = await resolveProjectContextFromAccessToken(
       authWithManagedProject,
