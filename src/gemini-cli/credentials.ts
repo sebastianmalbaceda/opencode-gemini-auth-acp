@@ -32,10 +32,13 @@ export function getGeminiSettingsPath(): string {
 
 /**
  * Path to the installed @google/gemini-cli package.
+ *
+ * Uses well-known OS paths for npm's global node_modules directory.
+ * No subprocess calls — 100% fast and reliable.
  */
 export function getGeminiCliPackagePath(): string {
-  const prefix = getNpmPrefix();
-  return join(prefix, "node_modules", "@google", "gemini-cli");
+  const globalNodeModules = getGlobalNodeModulesPath();
+  return join(globalNodeModules, "@google", "gemini-cli");
 }
 
 export interface GeminiCliCredentials {
@@ -130,48 +133,30 @@ export function isAccessTokenExpired(
 }
 
 /**
- * Checks if the Gemini CLI binary is available in PATH.
+ * Checks if the Gemini CLI is installed by looking for the npm package on disk.
  *
- * FAST: Uses a simple file existence check on the known installation path
- * instead of spawning a subprocess (which can hang or be slow).
+ * 100% synchronous file check — no subprocess, no execSync, no blocking.
  */
 export function isGeminiCliInstalled(): boolean {
-  // Check 1: Does the npm global package exist?
   const pkgPath = getGeminiCliPackagePath();
-  if (existsSync(join(pkgPath, "package.json"))) {
-    return true;
-  }
-
-  // Check 2: Does the gemini binary exist in PATH?
-  // We use a very short timeout and check via the shell directly.
-  try {
-    const { execSync } =
-      require("node:child_process") as typeof import("node:child_process");
-    const result = execSync("gemini --version", {
-      timeout: 3_000,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    return result.trim().length > 0;
-  } catch {
-    return false;
-  }
+  return existsSync(join(pkgPath, "package.json"));
 }
 
 /**
- * Gets the current Gemini CLI version without blocking more than 3s.
+ * Gets the current Gemini CLI version by reading the package.json.
+ * No subprocess — pure synchronous JSON parse.
  */
 export function getGeminiCliVersion(): string | null {
+  const pkgPath = getGeminiCliPackagePath();
+  const pkgJsonPath = join(pkgPath, "package.json");
+  if (!existsSync(pkgJsonPath)) {
+    return null;
+  }
   try {
-    const { execSync } =
-      require("node:child_process") as typeof import("node:child_process");
-    const result = execSync("gemini --version", {
-      timeout: 3_000,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const version = result.trim();
-    return version || null;
+    const pkg = JSON.parse(readFileSync(pkgJsonPath, "utf8")) as {
+      version?: string;
+    };
+    return pkg.version?.trim() || null;
   } catch {
     return null;
   }
@@ -288,36 +273,42 @@ function readDirSafe(dir: string): string[] {
   }
 }
 
-function getNpmPrefix(): string {
-  // First try reading from npm config (no subprocess)
-  try {
-    const { execSync } =
-      require("node:child_process") as typeof import("node:child_process");
-    const result = execSync("npm root -g", {
-      timeout: 2_000,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const prefix = result.trim();
-    if (prefix) return prefix;
-  } catch {
-    // Fall through to OS-specific paths
+/**
+ * Returns the global node_modules path based on the current OS.
+ * No subprocess calls — uses well-known OS conventions.
+ */
+function getGlobalNodeModulesPath(): string {
+  const plat = platform();
+  const home = homedir();
+
+  if (plat === "win32") {
+    // Windows: %APPDATA%\npm\node_modules
+    return join(
+      process.env.APPDATA ?? join(home, "AppData", "Roaming"),
+      "npm",
+      "node_modules",
+    );
   }
 
-  // OS-specific fallback paths
-  const home = homedir();
-  const plat = platform();
-  if (plat === "win32") {
-    return join(process.env.APPDATA ?? join(home, "AppData", "Roaming"), "npm");
-  }
   if (plat === "darwin") {
+    // macOS: /usr/local/lib/node_modules (homebrew) or ~/.npm-global/lib/node_modules
+    const homeNodeModules = join(home, ".npm-global", "lib", "node_modules");
+    if (existsSync(homeNodeModules)) {
+      return homeNodeModules;
+    }
     return "/usr/local/lib/node_modules";
+  }
+
+  // Linux: check common paths
+  const homeNodeModules = join(home, ".npm-global", "lib", "node_modules");
+  if (existsSync(homeNodeModules)) {
+    return homeNodeModules;
   }
   return "/usr/lib/node_modules";
 }
 
 export const credentialInternals = {
-  getNpmPrefix,
+  getGlobalNodeModulesPath,
   readDirSafe,
   extractFromBundleFiles,
 };
