@@ -24,7 +24,6 @@ import { AcpClient } from "./acp";
 import type {
   GetAuth,
   LoaderResult,
-  OAuthAuthDetails,
   PluginContext,
   PluginResult,
   Provider,
@@ -42,15 +41,14 @@ let acpClientPromise: Promise<AcpClient> | null = null;
 let acpClient: AcpClient | null = null;
 let acpSessionId: string | null = null;
 
-async function getAcp(): Promise<{ client: AcpClient; sessionId: string }> {
+async function getAcp(): Promise<AcpClient> {
   if (acpClient && acpSessionId && acpClient.isConnected) {
-    return { client: acpClient, sessionId: acpSessionId };
+    return acpClient;
   }
   if (!acpClientPromise) {
     acpClientPromise = initAcp();
   }
-  const c = await acpClientPromise;
-  return { client: c, sessionId: acpSessionId! };
+  return await acpClientPromise;
 }
 
 async function initAcp(): Promise<AcpClient> {
@@ -130,18 +128,17 @@ export const GeminiCLIOAuthPlugin = async ({
         latestGeminiAuthResolver = getAuth;
         const auth = await getAuth();
         if (!isOAuthAuth(auth)) return null;
-
         await resolveLatestConfiguredProjectId(provider);
         normalizeProviderModelCosts(provider);
 
         return {
           apiKey: "",
           async fetch(input, init) {
-            try {
-              return await acpFetch(input, init, getAuth, client);
-            } catch {
+            // Route all generative requests through ACP
+            if (!isGenerativeLanguageRequest(input)) {
               return geminiFetch(input, init);
             }
+            return acpFetch(input, init, getAuth, client);
           },
         };
       },
@@ -165,7 +162,7 @@ export const GeminiCLIOAuthPlugin = async ({
 
 export const GoogleOAuthPlugin = GeminiCLIOAuthPlugin;
 
-// ─── ACP Fetch Handler ──────────────────────────────────────
+// ─── ACP Fetch ──────────────────────────────────────────────
 
 async function acpFetch(
   input: RequestInfo,
@@ -173,84 +170,75 @@ async function acpFetch(
   getAuth: GetAuth,
   client: PluginContext["client"],
 ): Promise<Response> {
-  if (!isGenerativeLanguageRequest(input)) return geminiFetch(input, init);
-
-  // Auth
+  // Ensure valid auth
   const authLatest = await getAuth();
-  if (!isOAuthAuth(authLatest)) return geminiFetch(input, init);
+  if (!isOAuthAuth(authLatest)) {
+    return new Response(
+      "Not authenticated with Google. Run `opencode auth login`.",
+      { status: 401 },
+    );
+  }
   let ar = resolveCachedAuth(authLatest);
   if (accessTokenExpired(ar)) {
     const ref = await refreshAccessToken(ar, client);
-    if (!ref?.access) return geminiFetch(input, init);
+    if (!ref?.access) {
+      return new Response(
+        "Google session expired. Run `gemini auth login` to re-authenticate.",
+        { status: 401 },
+      );
+    }
     ar = ref;
   }
 
-  // Extract user text from body
+  // Extract user text from the request body
   const raw = typeof init?.body === "string" ? init.body : "";
   const { userText, systemText } = parseGeminiRequest(raw);
-  if (!userText) return geminiFetch(input, init);
+  if (!userText) {
+    return geminiFetch(input, init);
+  }
 
-  // ACP call
+  // Send via ACP
   try {
-    const { client: acp, sessionId } = await getAcp();
-    let fullText = "";
-    const result = await acp.sendPrompt(sessionId, userText, {
-      onChunk: (chunk) => {
-        fullText += chunk;
-      },
+    const acp = await getAcp();
+    const sid = acpSessionId;
+    if (!sid) throw new Error("No ACP session");
+
+    const result = await acp.sendPrompt(sid, userText, {
       systemPrompt: systemText,
     });
 
-    const out = result.text || fullText;
-    if (!out) return geminiFetch(input, init);
+    const out = result.text?.trim();
+    if (!out) throw new Error("Empty ACP response");
 
-    return buildSseResponse(out, result);
+    return buildSseResponse(out, result.stopReason);
   } catch (err) {
-    console.error("[Gemini ACP] Error:", err);
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[Gemini ACP] Error:", msg);
     resetAcp();
-    return geminiFetch(input, init);
+    // Return a clear error instead of falling back to broken geminiFetch
+    return new Response(
+      `Gemini ACP error: ${msg}. The ACP connection has been reset. Try again.`,
+      { status: 502 },
+    );
   }
 }
 
 // ─── Response Builder ───────────────────────────────────────
 
-function buildSseResponse(
-  text: string,
-  result: {
-    stopReason?: string;
-    usage?: {
-      totalTokens?: number;
-      promptTokens?: number;
-      completionTokens?: number;
-    };
-  },
-): Response {
+function buildSseResponse(text: string, stopReason?: string): Response {
   const encoder = new TextEncoder();
-  const stream = new ReadableStream({
-    start(controller) {
-      const data = JSON.stringify({
-        candidates: [
-          {
-            content: { parts: [{ text }], role: "model" },
-            finishReason: result.stopReason || "STOP",
-            safetyRatings: [],
-          },
-        ],
-        usageMetadata: result.usage
-          ? {
-              promptTokenCount: result.usage.promptTokens ?? 0,
-              candidatesTokenCount: result.usage.completionTokens ?? 0,
-              totalTokenCount: result.usage.totalTokens ?? 0,
-            }
-          : undefined,
-      });
-      controller.enqueue(encoder.encode(`data: ${data}\n\n`));
-      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-      controller.close();
-    },
+  const data = JSON.stringify({
+    candidates: [
+      {
+        content: { parts: [{ text }], role: "model" },
+        finishReason: stopReason || "STOP",
+        safetyRatings: [],
+      },
+    ],
   });
 
-  return new Response(stream, {
+  const body = `data: ${data}\n\ndata: [DONE]\n\n`;
+  return new Response(encoder.encode(body), {
     status: 200,
     headers: {
       "Content-Type": "text/event-stream",
@@ -286,7 +274,7 @@ function parseGeminiRequest(body: string): {
         .join("\n");
     }
 
-    // Last user message
+    // Last user message only
     let userText = "";
     for (let i = contents.length - 1; i >= 0; i--) {
       const c = contents[i];
