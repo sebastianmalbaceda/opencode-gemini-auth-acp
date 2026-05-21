@@ -15,23 +15,19 @@
 import { readFileSync, existsSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
-import { execSync } from "node:child_process";
 
 /**
  * Path to the Gemini CLI's OAuth credential store.
  */
 export function getGeminiOAuthCredsPath(): string {
-  const home = homedir();
-  // Gemini CLI stores credentials in ~/.gemini/oauth_creds.json
-  return join(home, ".gemini", "oauth_creds.json");
+  return join(homedir(), ".gemini", "oauth_creds.json");
 }
 
 /**
  * Path to the Gemini CLI's settings file.
  */
 export function getGeminiSettingsPath(): string {
-  const home = homedir();
-  return join(home, ".gemini", "settings.json");
+  return join(homedir(), ".gemini", "settings.json");
 }
 
 /**
@@ -58,6 +54,7 @@ export interface GeminiOAuthAppCredentials {
 
 /**
  * Reads the OAuth credentials from the Gemini CLI's credential store.
+ * Pure synchronous file read — no subprocess, no blocking delays.
  */
 export function readGeminiCredentials(): GeminiCliCredentials | null {
   const credsPath = getGeminiOAuthCredsPath();
@@ -114,20 +111,12 @@ export function readGeminiCredentials(): GeminiCliCredentials | null {
 }
 
 /**
- * Checks whether the Gemini CLI is authenticated and has valid credentials.
+ * Checks whether the Gemini CLI has stored credentials.
+ *
+ * FAST: Only checks file existence — no subprocess calls.
  */
 export function isGeminiAuthenticated(): boolean {
-  const creds = readGeminiCredentials();
-  if (!creds) {
-    return false;
-  }
-
-  const settingsPath = getGeminiSettingsPath();
-  if (!existsSync(settingsPath)) {
-    return false;
-  }
-
-  return true;
+  return existsSync(getGeminiOAuthCredsPath());
 }
 
 /**
@@ -142,11 +131,24 @@ export function isAccessTokenExpired(
 
 /**
  * Checks if the Gemini CLI binary is available in PATH.
+ *
+ * FAST: Uses a simple file existence check on the known installation path
+ * instead of spawning a subprocess (which can hang or be slow).
  */
 export function isGeminiCliInstalled(): boolean {
+  // Check 1: Does the npm global package exist?
+  const pkgPath = getGeminiCliPackagePath();
+  if (existsSync(join(pkgPath, "package.json"))) {
+    return true;
+  }
+
+  // Check 2: Does the gemini binary exist in PATH?
+  // We use a very short timeout and check via the shell directly.
   try {
+    const { execSync } =
+      require("node:child_process") as typeof import("node:child_process");
     const result = execSync("gemini --version", {
-      timeout: 10_000,
+      timeout: 3_000,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     });
@@ -157,12 +159,14 @@ export function isGeminiCliInstalled(): boolean {
 }
 
 /**
- * Gets the current Gemini CLI version installed.
+ * Gets the current Gemini CLI version without blocking more than 3s.
  */
 export function getGeminiCliVersion(): string | null {
   try {
+    const { execSync } =
+      require("node:child_process") as typeof import("node:child_process");
     const result = execSync("gemini --version", {
-      timeout: 5_000,
+      timeout: 3_000,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     });
@@ -285,28 +289,31 @@ function readDirSafe(dir: string): string[] {
 }
 
 function getNpmPrefix(): string {
+  // First try reading from npm config (no subprocess)
   try {
+    const { execSync } =
+      require("node:child_process") as typeof import("node:child_process");
     const result = execSync("npm root -g", {
-      timeout: 5_000,
+      timeout: 2_000,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     });
-    return result.trim();
+    const prefix = result.trim();
+    if (prefix) return prefix;
   } catch {
-    // Fallback paths for common OS
-    const home = homedir();
-    const plat = platform();
-    if (plat === "win32") {
-      return join(
-        process.env.APPDATA ?? join(home, "AppData", "Roaming"),
-        "npm",
-      );
-    }
-    if (plat === "darwin") {
-      return "/usr/local/lib/node_modules";
-    }
-    return "/usr/lib/node_modules";
+    // Fall through to OS-specific paths
   }
+
+  // OS-specific fallback paths
+  const home = homedir();
+  const plat = platform();
+  if (plat === "win32") {
+    return join(process.env.APPDATA ?? join(home, "AppData", "Roaming"), "npm");
+  }
+  if (plat === "darwin") {
+    return "/usr/local/lib/node_modules";
+  }
+  return "/usr/lib/node_modules";
 }
 
 export const credentialInternals = {

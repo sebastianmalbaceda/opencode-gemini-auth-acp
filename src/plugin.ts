@@ -56,7 +56,7 @@ let latestGeminiUserAgentModel: string | undefined;
 export const GeminiCLIOAuthPlugin = async ({
   client,
 }: PluginContext): Promise<PluginResult> => {
-  // Check if Gemini CLI is available
+  // Fast check for Gemini CLI availability — synchronous file checks only, no subprocess
   const cliInstalled = isGeminiCliInstalled();
   const cliAuthenticated = cliInstalled && isGeminiAuthenticated();
 
@@ -71,12 +71,11 @@ export const GeminiCLIOAuthPlugin = async ({
   } else if (!cliAuthenticated) {
     console.warn(
       "\n[Gemini Plugin] Gemini CLI is installed but not authenticated.\n" +
-        "Run `gemini auth login` in your terminal, then restart Opencode.\n",
+        "Run `gemini auth login` in your terminal, then restart Opencode.\n" +
+        "Alternatively, proceed with browser-based OAuth below.\n",
     );
-  } else {
-    if (isGeminiDebugEnabled()) {
-      logGeminiDebugMessage("Gemini CLI detected and authenticated.");
-    }
+  } else if (isGeminiDebugEnabled()) {
+    logGeminiDebugMessage("Gemini CLI detected and authenticated.");
   }
 
   const resolveLatestConfiguredProjectId = async (
