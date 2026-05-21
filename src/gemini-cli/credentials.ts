@@ -214,17 +214,25 @@ export function readGeminiAppCredentials(): GeminiOAuthAppCredentials | null {
     }
 
     // Search through bundle chunks for the OAuth client credentials.
-    // The CLI bundles these values as string literals in its chunk files.
+    // The CLI bundles these values as variable assignments like:
+    //   var OAUTH_CLIENT_ID = "6812558...";
+    //   var OAUTH_CLIENT_SECRET = "GOCSPX...";
     const clientId = extractFromBundleFiles(
       bundleDir,
       [/681255809395/],
-      [/["''']client_id["''"]\s*[,:]\s*["''']([^"'']+)["''']/],
+      [
+        /OAUTH_CLIENT_ID\s*=\s*"([^"]+)"/,
+        /client_id["''"]?\s*[:=]\s*["''']([^"'']+)["''']/,
+      ],
     );
 
     const clientSecret = extractFromBundleFiles(
       bundleDir,
       [/GOCSPX/],
-      [/["''']client_secret["''"]\s*[,:]\s*["''']([^"'']+)["''']/],
+      [
+        /OAUTH_CLIENT_SECRET\s*=\s*"([^"]+)"/,
+        /client_secret["''"]?\s*[:=]\s*["''']([^"'']+)["''']/,
+      ],
     );
 
     if (clientId && clientSecret) {
