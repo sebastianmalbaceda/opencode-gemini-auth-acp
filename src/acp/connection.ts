@@ -4,31 +4,30 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { createInterface } from "node:readline/promises";
+import { createInterface } from "node:readline";
 import type {
   JsonRpcRequest,
   JsonRpcResponse,
   JsonRpcNotification,
 } from "./protocol";
 
-const ACP_CONNECT_TIMEOUT_MS = 15_000;
-const ACP_REQUEST_TIMEOUT_MS = 30_000;
+const ACP_REQUEST_TIMEOUT_MS = 60_000;
 let nextRequestId = 1;
 
+function debugLog(msg: string): void {
+  if (process.env.OPENCODE_GEMINI_DEBUG === "1") {
+    console.error(`[ACP] ${msg}`);
+  }
+}
+
 export interface AcpConnection {
-  /** Send a JSON-RPC request and wait for the matching response. */
   request<T>(method: string, params?: unknown): Promise<T>;
-  /** Send a JSON-RPC notification (no response expected). */
   notify(method: string, params?: unknown): void;
-  /** Register a handler for notifications from the CLI. */
   onNotification(handler: (method: string, params: unknown) => void): void;
-  /** Register a handler for inbound requests from the CLI (client methods). */
   onRequest(
     handler: (method: string, params: unknown) => Promise<unknown>,
   ): void;
-  /** Cleanly shut down the subprocess. */
   close(): Promise<void>;
-  /** Check if connection is active. */
   get isConnected(): boolean;
 }
 
@@ -36,17 +35,22 @@ export interface AcpConnection {
  * Spawns `gemini --acp` and returns a connection handle.
  */
 export async function connectAcp(): Promise<AcpConnection> {
+  const stderrChunks: string[] = [];
+
   const proc = spawn("gemini", ["--acp"], {
     stdio: ["pipe", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      // Don't let the CLI try to read workspace context
-      GEMINI_DISABLE_WORKSPACE: "1",
-    },
+    env: { ...process.env },
   });
 
   if (!proc.stdin || !proc.stdout) {
     throw new Error("Failed to spawn gemini --acp: missing stdio pipes");
+  }
+
+  // Capture stderr for diagnostics
+  if (proc.stderr) {
+    proc.stderr.on("data", (chunk: Buffer) => {
+      stderrChunks.push(chunk.toString());
+    });
   }
 
   // ─── Pending requests map ──────────────────────────────────
@@ -59,7 +63,6 @@ export async function connectAcp(): Promise<AcpConnection> {
     }
   >();
 
-  // ─── Notification & inbound request handlers ───────────────
   let notifyHandler: ((method: string, params: unknown) => void) | null = null;
   let requestHandler:
     | ((method: string, params: unknown) => Promise<unknown>)
@@ -73,76 +76,82 @@ export async function connectAcp(): Promise<AcpConnection> {
     const trimmed = line.trim();
     if (!trimmed) return;
 
+    let msg: unknown;
     try {
-      const msg = JSON.parse(trimmed);
+      msg = JSON.parse(trimmed);
+    } catch {
+      return; // silently ignore non-JSON lines (like warnings)
+    }
 
-      if (isResponse(msg)) {
-        // Match a pending request
-        const pendingReq = pending.get(msg.id);
-        if (pendingReq) {
-          clearTimeout(pendingReq.timer);
-          pending.delete(msg.id);
-          if (msg.error) {
-            pendingReq.reject(
-              new Error(`ACP error (${msg.error.code}): ${msg.error.message}`),
-            );
-          } else {
-            pendingReq.resolve(msg.result);
-          }
-        }
-      } else if (isNotification(msg)) {
-        // Forward notification to handler
-        notifyHandler?.(msg.method, msg.params);
-      } else if (isRequest(msg)) {
-        // Handle inbound request (client method call from CLI)
-        if (requestHandler) {
-          requestHandler(msg.method, msg.params)
-            .then((result) => {
-              writeMessage(proc, {
-                jsonrpc: "2.0",
-                id: msg.id,
-                result,
-              });
-            })
-            .catch((error) => {
-              writeMessage(proc, {
-                jsonrpc: "2.0",
-                id: msg.id,
-                error: {
-                  code: -1,
-                  message: error.message ?? "Internal error",
-                },
-              });
-            });
+    if (!msg || typeof msg !== "object") return;
+
+    const hasId = "id" in (msg as Record<string, unknown>);
+    const hasMethod = "method" in (msg as Record<string, unknown>);
+
+    if (hasId && hasMethod) {
+      // ── Inbound request from CLI (e.g. fs/read_text_file, session/update) ──
+      const req = msg as JsonRpcRequest;
+      if (requestHandler) {
+        requestHandler(req.method, req.params)
+          .then((result) =>
+            writeJson(proc, { jsonrpc: "2.0", id: req.id, result }),
+          )
+          .catch((error) =>
+            writeJson(proc, {
+              jsonrpc: "2.0",
+              id: req.id,
+              error: { code: -1, message: error.message ?? "Error" },
+            }),
+          );
+      } else {
+        writeJson(proc, {
+          jsonrpc: "2.0",
+          id: req.id,
+          error: { code: -32601, message: "Method not implemented" },
+        });
+      }
+    } else if (hasId && !hasMethod) {
+      // ── Response to our request ──
+      const res = msg as JsonRpcResponse;
+      const pendingReq = pending.get(res.id);
+      if (pendingReq) {
+        clearTimeout(pendingReq.timer);
+        pending.delete(res.id);
+        if (res.error) {
+          pendingReq.reject(
+            new Error(`ACP error (${res.error.code}): ${res.error.message}`),
+          );
         } else {
-          writeMessage(proc, {
-            jsonrpc: "2.0",
-            id: msg.id,
-            error: { code: -32601, message: "Method not implemented" },
-          });
+          pendingReq.resolve(res.result);
         }
       }
-    } catch {
-      // Silently ignore malformed JSON lines
+    } else if (hasMethod && !hasId) {
+      // ── Notification from CLI ──
+      const notif = msg as JsonRpcNotification;
+      notifyHandler?.(notif.method, notif.params);
     }
   });
 
   // ─── Handle process exit ───────────────────────────────────
   const onExit = new Promise<void>((resolve) => {
-    proc.on("exit", () => {
+    proc.on("exit", (code, signal) => {
       closed = true;
-      // Reject all pending requests
+      const stderrLog = stderrChunks.join("").trim();
+      const exitInfo = `exit code=${code} signal=${signal}`;
+      const stderrInfo = stderrLog ? ` stderr: ${stderrLog.slice(0, 500)}` : "";
+
       for (const [, pendingReq] of pending) {
         clearTimeout(pendingReq.timer);
-        pendingReq.reject(new Error("ACP connection closed"));
+        pendingReq.reject(
+          new Error(`ACP connection closed (${exitInfo}${stderrInfo})`),
+        );
       }
       pending.clear();
       resolve();
     });
   });
 
-  // ─── Helper: write JSON-RPC message to stdin ───────────────
-  function writeMessage(
+  function writeJson(
     p: ChildProcess,
     msg: JsonRpcRequest | JsonRpcResponse,
   ): void {
@@ -176,7 +185,7 @@ export async function connectAcp(): Promise<AcpConnection> {
           timer,
         });
 
-        writeMessage(proc, {
+        writeJson(proc, {
           jsonrpc: "2.0",
           id,
           method,
@@ -187,7 +196,7 @@ export async function connectAcp(): Promise<AcpConnection> {
 
     notify(method: string, params?: unknown): void {
       if (closed) return;
-      writeMessage(proc, {
+      writeJson(proc, {
         jsonrpc: "2.0",
         method,
         params,
@@ -207,79 +216,32 @@ export async function connectAcp(): Promise<AcpConnection> {
     close(): Promise<void> {
       if (closed) return Promise.resolve();
       closed = true;
-      proc.stdin?.end();
-      proc.kill();
+      try {
+        proc.stdin?.end();
+      } catch {}
+      try {
+        proc.kill();
+      } catch {}
       return onExit;
     },
 
     get isConnected(): boolean {
-      // proc.exitCode is null when the process is running
       return !closed && proc.exitCode === null;
     },
   };
 
-  // Wait for the process to be ready
-  await waitForProcessReady(proc);
+  // Small delay to ensure the process is alive before first message
+  await new Promise((r) => setTimeout(r, 500));
+
+  if (proc.exitCode !== null) {
+    const stderrLog = stderrChunks.join("").trim();
+    const detail = stderrLog ? ` (stderr: ${stderrLog.slice(0, 300)})` : "";
+    throw new Error(
+      `Gemini CLI exited immediately (code: ${proc.exitCode}${detail})`,
+    );
+  }
 
   return connection;
 }
 
-async function waitForProcessReady(proc: ChildProcess): Promise<void> {
-  const start = Date.now();
-  while (Date.now() - start < ACP_CONNECT_TIMEOUT_MS) {
-    if (proc.exitCode !== null) {
-      throw new Error(`Gemini CLI exited prematurely (code: ${proc.exitCode})`);
-    }
-    if (proc.stdout?.readable) {
-      return;
-    }
-    await sleep(100);
-  }
-  throw new Error(
-    `Gemini CLI did not become ready within ${ACP_CONNECT_TIMEOUT_MS}ms`,
-  );
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-// ─── JSON-RPC type guards ────────────────────────────────────────
-
-function isResponse(msg: unknown): msg is JsonRpcResponse {
-  return (
-    typeof msg === "object" &&
-    msg !== null &&
-    "jsonrpc" in msg &&
-    (msg as Record<string, unknown>).jsonrpc === "2.0" &&
-    "id" in msg
-  );
-}
-
-function isNotification(msg: unknown): msg is JsonRpcNotification {
-  return (
-    typeof msg === "object" &&
-    msg !== null &&
-    "jsonrpc" in msg &&
-    (msg as Record<string, unknown>).jsonrpc === "2.0" &&
-    "method" in msg &&
-    !("id" in msg)
-  );
-}
-
-function isRequest(msg: unknown): msg is JsonRpcRequest {
-  return (
-    typeof msg === "object" &&
-    msg !== null &&
-    "jsonrpc" in msg &&
-    (msg as Record<string, unknown>).jsonrpc === "2.0" &&
-    "method" in msg &&
-    "id" in msg
-  );
-}
-
-export const connectionInternals = {
-  isResponse,
-  isNotification,
-  isRequest,
-};
+export const connectionInternals = {};

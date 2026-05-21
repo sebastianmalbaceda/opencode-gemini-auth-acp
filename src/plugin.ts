@@ -1,8 +1,9 @@
 /**
- * Gemini CLI ACP Plugin for Opencode.
+ * Gemini CLI Plugin for Opencode.
  *
- * Architecture:
- *   Opencode → Plugin → ACP (JSON-RPC stdio) → gemini --acp → Google APIs
+ * Uses `gemini -p` (CLI prompt mode) for all generative requests.
+ * The CLI handles authentication, token refresh, and API calls.
+ * The plugin simply bridges Opencode's requests to the CLI.
  */
 
 import { GEMINI_PROVIDER_ID } from "./constants";
@@ -20,7 +21,7 @@ import {
 } from "./plugin/provider";
 import { isGenerativeLanguageRequest } from "./plugin/request/shared";
 import { refreshAccessToken } from "./plugin/token";
-import { AcpClient } from "./acp";
+import { runGeminiPrompt } from "./gemini-run";
 import type {
   GetAuth,
   LoaderResult,
@@ -30,51 +31,9 @@ import type {
 } from "./plugin/types";
 
 const GEMINI_QUOTA_COMMAND = "gquota";
-const GEMINI_QUOTA_COMMAND_TEMPLATE = `Retrieve Gemini Code Assist quota usage.
-
-Immediately call \`${GEMINI_QUOTA_TOOL_NAME}\` with no arguments and return its output verbatim.`;
+const GEMINI_QUOTA_COMMAND_TEMPLATE = `Retrieve Gemini Code Assist quota usage. Immediately call \`${GEMINI_QUOTA_TOOL_NAME}\` with no arguments.`;
 let latestGeminiAuthResolver: GetAuth | undefined;
 let latestGeminiConfiguredProjectId: string | undefined;
-
-// ─── Module-level ACP singleton ──────────────────────────────
-let acpClientPromise: Promise<AcpClient> | null = null;
-let acpClient: AcpClient | null = null;
-let acpSessionId: string | null = null;
-
-async function getAcp(): Promise<AcpClient> {
-  if (acpClient && acpSessionId && acpClient.isConnected) {
-    return acpClient;
-  }
-  if (!acpClientPromise) {
-    acpClientPromise = initAcp();
-  }
-  return await acpClientPromise;
-}
-
-async function initAcp(): Promise<AcpClient> {
-  logGeminiDebugMessage("ACP: connecting...");
-  const c = await AcpClient.create();
-  const info = await c.initialize();
-  logGeminiDebugMessage(
-    `ACP: ${info.agentInfo.name} v${info.agentInfo.version}`,
-  );
-  await c.authenticate();
-  const sid = await c.createSession(process.cwd());
-  logGeminiDebugMessage(`ACP session: ${sid}`);
-  acpClient = c;
-  acpSessionId = sid;
-  return c;
-}
-
-function resetAcp(): void {
-  const p = acpClientPromise;
-  acpClientPromise = null;
-  acpClient = null;
-  acpSessionId = null;
-  if (p) p.then((c) => c.destroy().catch(() => {})).catch(() => {});
-}
-
-// ─── Plugin ──────────────────────────────────────────────────
 
 export const GeminiCLIOAuthPlugin = async ({
   client,
@@ -134,11 +93,12 @@ export const GeminiCLIOAuthPlugin = async ({
         return {
           apiKey: "",
           async fetch(input, init) {
-            // Route all generative requests through ACP
+            // Non-generative requests pass through
             if (!isGenerativeLanguageRequest(input)) {
               return geminiFetch(input, init);
             }
-            return acpFetch(input, init, getAuth, client);
+            // All generative requests go through the CLI
+            return cliFetch(input, init, getAuth, client);
           },
         };
       },
@@ -162,9 +122,9 @@ export const GeminiCLIOAuthPlugin = async ({
 
 export const GoogleOAuthPlugin = GeminiCLIOAuthPlugin;
 
-// ─── ACP Fetch ──────────────────────────────────────────────
+// ─── CLI Fetch ──────────────────────────────────────────────
 
-async function acpFetch(
+async function cliFetch(
   input: RequestInfo,
   init: RequestInit | undefined,
   getAuth: GetAuth,
@@ -173,72 +133,61 @@ async function acpFetch(
   // Ensure valid auth
   const authLatest = await getAuth();
   if (!isOAuthAuth(authLatest)) {
-    return new Response(
-      "Not authenticated with Google. Run `opencode auth login`.",
-      { status: 401 },
-    );
+    return new Response("Not authenticated. Run `opencode auth login`.", {
+      status: 401,
+    });
   }
   let ar = resolveCachedAuth(authLatest);
   if (accessTokenExpired(ar)) {
     const ref = await refreshAccessToken(ar, client);
     if (!ref?.access) {
-      return new Response(
-        "Google session expired. Run `gemini auth login` to re-authenticate.",
-        { status: 401 },
-      );
+      return new Response("Session expired. Run `gemini auth login`.", {
+        status: 401,
+      });
     }
     ar = ref;
   }
 
-  // Extract user text from the request body
+  // Extract user text and model from the request
   const raw = typeof init?.body === "string" ? init.body : "";
-  const { userText, systemText } = parseGeminiRequest(raw);
+  const { userText, systemText, model } = parseRequest(raw);
   if (!userText) {
     return geminiFetch(input, init);
   }
 
-  // Send via ACP
+  // Run via the Gemini CLI
   try {
-    const acp = await getAcp();
-    const sid = acpSessionId;
-    if (!sid) throw new Error("No ACP session");
-
-    const result = await acp.sendPrompt(sid, userText, {
-      systemPrompt: systemText,
+    const result = await runGeminiPrompt(userText, {
+      model: model || undefined,
+      systemPrompt: systemText || undefined,
     });
 
-    const out = result.text?.trim();
-    if (!out) throw new Error("Empty ACP response");
+    if (!result.text) {
+      throw new Error("Empty response from Gemini CLI");
+    }
 
-    return buildSseResponse(out, result.stopReason);
+    return buildSseResponse(result.text);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error("[Gemini ACP] Error:", msg);
-    resetAcp();
-    // Return a clear error instead of falling back to broken geminiFetch
-    return new Response(
-      `Gemini ACP error: ${msg}. The ACP connection has been reset. Try again.`,
-      { status: 502 },
-    );
+    console.error("[Gemini CLI] Error:", msg);
+    return new Response(`Gemini error: ${msg}`, { status: 502 });
   }
 }
 
 // ─── Response Builder ───────────────────────────────────────
 
-function buildSseResponse(text: string, stopReason?: string): Response {
+function buildSseResponse(text: string): Response {
   const encoder = new TextEncoder();
   const data = JSON.stringify({
     candidates: [
       {
         content: { parts: [{ text }], role: "model" },
-        finishReason: stopReason || "STOP",
+        finishReason: "STOP",
         safetyRatings: [],
       },
     ],
   });
-
-  const body = `data: ${data}\n\ndata: [DONE]\n\n`;
-  return new Response(encoder.encode(body), {
+  return new Response(encoder.encode(`data: ${data}\n\ndata: [DONE]\n\n`), {
     status: 200,
     headers: {
       "Content-Type": "text/event-stream",
@@ -249,9 +198,10 @@ function buildSseResponse(text: string, stopReason?: string): Response {
 
 // ─── Request Parser ─────────────────────────────────────────
 
-function parseGeminiRequest(body: string): {
+function parseRequest(body: string): {
   userText: string;
   systemText?: string;
+  model?: string;
 } {
   if (!body) return { userText: "" };
   try {
@@ -260,6 +210,14 @@ function parseGeminiRequest(body: string): {
     const contents = req.contents as Array<Record<string, unknown>> | undefined;
     if (!Array.isArray(contents) || contents.length === 0)
       return { userText: "" };
+
+    // Model
+    const model =
+      typeof parsed.model === "string"
+        ? parsed.model
+        : typeof req.model === "string"
+          ? req.model
+          : undefined;
 
     // System instruction
     let systemText: string | undefined;
@@ -274,7 +232,7 @@ function parseGeminiRequest(body: string): {
         .join("\n");
     }
 
-    // Last user message only
+    // Last user message
     let userText = "";
     for (let i = contents.length - 1; i >= 0; i--) {
       const c = contents[i];
@@ -288,7 +246,7 @@ function parseGeminiRequest(body: string): {
       }
     }
 
-    return { userText, systemText };
+    return { userText, systemText, model };
   } catch {
     return { userText: "" };
   }
