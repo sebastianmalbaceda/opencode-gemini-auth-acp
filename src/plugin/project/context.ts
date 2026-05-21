@@ -1,6 +1,10 @@
 import { GEMINI_PROVIDER_ID } from "../../constants";
 import { formatRefreshParts, parseRefreshParts } from "../auth";
-import type { OAuthAuthDetails, PluginClient, ProjectContextResult } from "../types";
+import type {
+  OAuthAuthDetails,
+  PluginClient,
+  ProjectContextResult,
+} from "../types";
 import { loadManagedProject, onboardManagedProject } from "./api";
 import { FREE_TIER_ID, LEGACY_TIER_ID, ProjectIdRequiredError } from "./types";
 import {
@@ -12,7 +16,10 @@ import {
 } from "./utils";
 
 const projectContextResultCache = new Map<string, ProjectContextResult>();
-const projectContextPendingCache = new Map<string, Promise<ProjectContextResult>>();
+const projectContextPendingCache = new Map<
+  string,
+  Promise<ProjectContextResult>
+>();
 
 /**
  * Clears cached project context results and pending promises.
@@ -54,21 +61,46 @@ export async function resolveProjectContextFromAccessToken(
   const configuredProject = configuredProjectId?.trim();
   const projectId = configuredProject || parts.projectId;
 
-  if (!configuredProject && (projectId || parts.managedProjectId)) {
+  // OPTIMIZATION: If user explicitly configured a projectId, use it directly
+  // without calling :loadCodeAssist (saves ~10-20s on every first request).
+  if (configuredProject) {
+    return {
+      auth: withProjectAuth(
+        auth,
+        parts.refreshToken,
+        configuredProject,
+        parts.managedProjectId ?? configuredProject,
+      ),
+      effectiveProjectId: configuredProject,
+    };
+  }
+
+  if (projectId || parts.managedProjectId) {
     return {
       auth,
       effectiveProjectId: projectId || parts.managedProjectId || "",
     };
   }
 
-  const loadPayload = await loadManagedProject(accessToken, projectId, userAgentModel);
+  const loadPayload = await loadManagedProject(
+    accessToken,
+    projectId,
+    userAgentModel,
+  );
   if (!loadPayload) {
     throw new ProjectIdRequiredError();
   }
 
-  const managedProjectId = normalizeProjectId(loadPayload.cloudaicompanionProject);
+  const managedProjectId = normalizeProjectId(
+    loadPayload.cloudaicompanionProject,
+  );
   if (managedProjectId) {
-    const updatedAuth = withProjectAuth(auth, parts.refreshToken, projectId, managedProjectId);
+    const updatedAuth = withProjectAuth(
+      auth,
+      parts.refreshToken,
+      projectId,
+      managedProjectId,
+    );
     if (persistAuth) {
       await persistAuth(updatedAuth);
     }
@@ -84,7 +116,9 @@ export async function resolveProjectContextFromAccessToken(
     if (projectId) {
       return { auth, effectiveProjectId: projectId };
     }
-    const ineligibleMessage = buildIneligibleTierMessage(loadPayload.ineligibleTiers);
+    const ineligibleMessage = buildIneligibleTierMessage(
+      loadPayload.ineligibleTiers,
+    );
     if (ineligibleMessage) {
       throw new Error(ineligibleMessage);
     }
@@ -104,7 +138,12 @@ export async function resolveProjectContextFromAccessToken(
     userAgentModel,
   );
   if (onboardedProjectId) {
-    const updatedAuth = withProjectAuth(auth, parts.refreshToken, projectId, onboardedProjectId);
+    const updatedAuth = withProjectAuth(
+      auth,
+      parts.refreshToken,
+      projectId,
+      onboardedProjectId,
+    );
     if (persistAuth) {
       await persistAuth(updatedAuth);
     }
@@ -196,7 +235,10 @@ function withProjectAuth(
   };
 }
 
-function buildProjectCacheKey(auth: OAuthAuthDetails, configuredProjectId?: string): string | undefined {
+function buildProjectCacheKey(
+  auth: OAuthAuthDetails,
+  configuredProjectId?: string,
+): string | undefined {
   const base = getCacheKey(auth);
   if (!base) {
     return undefined;

@@ -173,11 +173,13 @@ describe("resolveProjectContextFromAccessToken", () => {
       "configured-project",
     );
 
+    // With configuredProject set, the function returns immediately without calling any APIs.
     expect(result.effectiveProjectId).toBe("configured-project");
-    expect(onboardBody?.cloudaicompanionProject).toBe("configured-project");
+    expect(onboardBody).toBeUndefined();
+    expect(fetchMock.mock.calls.length).toBe(0);
   });
 
-  it("throws validation-required errors before tier onboarding even when allowed tiers exist", async () => {
+  it("throws validation-required errors only when no configuredProject is set", async () => {
     const fetchMock = mock(async (input: RequestInfo) => {
       const url = toUrlString(input);
       if (url.includes(":loadCodeAssist")) {
@@ -201,12 +203,9 @@ describe("resolveProjectContextFromAccessToken", () => {
     (globalThis as { fetch: typeof fetch }).fetch =
       fetchMock as unknown as typeof fetch;
 
+    // Without configuredProject, validation errors surface
     await expect(
-      resolveProjectContextFromAccessToken(
-        baseAuth,
-        baseAuth.access ?? "",
-        "configured-project",
-      ),
+      resolveProjectContextFromAccessToken(baseAuth, baseAuth.access ?? ""),
     ).rejects.toThrow("Complete validation: https://example.com/verify");
   });
 
@@ -243,7 +242,8 @@ describe("resolveProjectContextFromAccessToken", () => {
       "configured-project",
     );
 
+    // With configuredProject set, the function returns immediately without calling APIs.
     expect(result.effectiveProjectId).toBe("configured-project");
-    expect(loadBody?.cloudaicompanionProject).toBe("configured-project");
+    expect(fetchMock.mock.calls.length).toBe(0);
   });
 });
