@@ -1,14 +1,8 @@
 /**
  * Gemini CLI ACP Plugin for Opencode.
  *
- * This plugin integrates the Gemini CLI via ACP (Agent Communication Protocol),
- * replacing the previous direct HTTP calls to internal Code Assist APIs.
- *
  * Architecture:
- *   Opencode → Plugin → ACP Client (JSON-RPC over stdio) → gemini --acp → Google APIs
- *
- * The Gemini CLI handles all authentication and API calls. The plugin
- * simply bridges Opencode's requests to the ACP protocol and vice versa.
+ *   Opencode → Plugin → ACP (JSON-RPC stdio) → gemini --acp → Google APIs
  */
 
 import { GEMINI_PROVIDER_ID } from "./constants";
@@ -17,7 +11,6 @@ import { geminiFetch } from "./fetch";
 import { createOAuthAuthorizeMethod } from "./plugin/oauth-authorize";
 import { accessTokenExpired, isOAuthAuth } from "./plugin/auth";
 import { resolveCachedAuth } from "./plugin/cache";
-import { retrieveUserQuota } from "./plugin/project";
 import { createGeminiQuotaTool, GEMINI_QUOTA_TOOL_NAME } from "./plugin/quota";
 import { isGeminiDebugEnabled, logGeminiDebugMessage } from "./plugin/debug";
 import {
@@ -32,93 +25,82 @@ import type {
   GetAuth,
   LoaderResult,
   OAuthAuthDetails,
-  PluginClient,
   PluginContext,
   PluginResult,
   Provider,
 } from "./plugin/types";
 
 const GEMINI_QUOTA_COMMAND = "gquota";
-const GEMINI_QUOTA_COMMAND_TEMPLATE = `Retrieve Gemini Code Assist quota usage for the current authenticated account.
+const GEMINI_QUOTA_COMMAND_TEMPLATE = `Retrieve Gemini Code Assist quota usage.
 
-Immediately call \`${GEMINI_QUOTA_TOOL_NAME}\` with no arguments and return its output verbatim.
-Do not call other tools.
-`;
+Immediately call \`${GEMINI_QUOTA_TOOL_NAME}\` with no arguments and return its output verbatim.`;
 let latestGeminiAuthResolver: GetAuth | undefined;
 let latestGeminiConfiguredProjectId: string | undefined;
 
-/**
- * Registers the Gemini ACP provider for Opencode.
- */
+// ─── Module-level ACP singleton ──────────────────────────────
+let acpClientPromise: Promise<AcpClient> | null = null;
+let acpClient: AcpClient | null = null;
+let acpSessionId: string | null = null;
+
+async function getAcp(): Promise<{ client: AcpClient; sessionId: string }> {
+  if (acpClient && acpSessionId && acpClient.isConnected) {
+    return { client: acpClient, sessionId: acpSessionId };
+  }
+  if (!acpClientPromise) {
+    acpClientPromise = initAcp();
+  }
+  const c = await acpClientPromise;
+  return { client: c, sessionId: acpSessionId! };
+}
+
+async function initAcp(): Promise<AcpClient> {
+  logGeminiDebugMessage("ACP: connecting...");
+  const c = await AcpClient.create();
+  const info = await c.initialize();
+  logGeminiDebugMessage(
+    `ACP: ${info.agentInfo.name} v${info.agentInfo.version}`,
+  );
+  await c.authenticate();
+  const sid = await c.createSession(process.cwd());
+  logGeminiDebugMessage(`ACP session: ${sid}`);
+  acpClient = c;
+  acpSessionId = sid;
+  return c;
+}
+
+function resetAcp(): void {
+  const p = acpClientPromise;
+  acpClientPromise = null;
+  acpClient = null;
+  acpSessionId = null;
+  if (p) p.then((c) => c.destroy().catch(() => {})).catch(() => {});
+}
+
+// ─── Plugin ──────────────────────────────────────────────────
+
 export const GeminiCLIOAuthPlugin = async ({
   client,
 }: PluginContext): Promise<PluginResult> => {
-  // Fast CLI detection
   const cliInstalled = isGeminiCliInstalled();
   const cliAuthenticated = cliInstalled && isGeminiAuthenticated();
 
   if (!cliInstalled) {
     console.warn(
-      "\n[Gemini Plugin] The Gemini CLI is not installed. " +
-        "Install it globally with: npm install -g @google/gemini-cli\n" +
-        "Then authenticate with: gemini auth login\n" +
-        "After that, restart Opencode.\n",
+      "\n[Gemini] CLI not found. Install: npm install -g @google/gemini-cli",
     );
   } else if (!cliAuthenticated) {
-    console.warn(
-      "\n[Gemini Plugin] Gemini CLI is installed but not authenticated.\n" +
-        "Run `gemini auth login` in your terminal, then restart Opencode.\n" +
-        "Alternatively, proceed with browser-based OAuth below.\n",
-    );
+    console.warn("\n[Gemini] CLI not authenticated. Run: gemini auth login");
   } else if (isGeminiDebugEnabled()) {
     logGeminiDebugMessage("Gemini CLI detected and authenticated.");
   }
 
-  // ─── ACP client (lazy init) ───────────────────────────────
-  let acpClient: AcpClient | null = null;
-  let acpSessionId: string | null = null;
-  let acpInitialized = false;
-
-  async function ensureAcpConnection(): Promise<{
-    client: AcpClient;
-    sessionId: string;
-  }> {
-    if (acpClient && acpSessionId && acpClient.isConnected) {
-      return { client: acpClient, sessionId: acpSessionId };
-    }
-
-    if (acpClient) {
-      await acpClient.destroy().catch(() => {});
-    }
-
-    logGeminiDebugMessage("Starting ACP connection to gemini --acp...");
-    const client_ = await AcpClient.create();
-    const info = await client_.initialize();
-    logGeminiDebugMessage(
-      `ACP connected: ${info.agentInfo.name} v${info.agentInfo.version}`,
-    );
-    await client_.authenticate();
-    const sessionId = await client_.createSession(process.cwd());
-    logGeminiDebugMessage(`ACP session created: ${sessionId}`);
-
-    acpClient = client_;
-    acpSessionId = sessionId;
-    acpInitialized = true;
-    return { client: client_, sessionId };
-  }
-
-  const resolveLatestConfiguredProjectId = async (
-    provider?: Provider,
-  ): Promise<string | undefined> => {
+  const resolveLatestConfiguredProjectId = async (provider?: Provider) => {
     const configProjectId =
       (await resolveConfiguredProjectIdFromClient(client)) ??
       latestGeminiConfiguredProjectId;
-    const resolvedProjectId = resolveConfiguredProjectId({
-      provider,
-      configProjectId,
-    });
-    latestGeminiConfiguredProjectId = resolvedProjectId;
-    return resolvedProjectId;
+    const resolved = resolveConfiguredProjectId({ provider, configProjectId });
+    latestGeminiConfiguredProjectId = resolved;
+    return resolved;
   };
 
   return {
@@ -147,9 +129,7 @@ export const GeminiCLIOAuthPlugin = async ({
       ): Promise<LoaderResult | null> => {
         latestGeminiAuthResolver = getAuth;
         const auth = await getAuth();
-        if (!isOAuthAuth(auth)) {
-          return null;
-        }
+        if (!isOAuthAuth(auth)) return null;
 
         await resolveLatestConfiguredProjectId(provider);
         normalizeProviderModelCosts(provider);
@@ -157,65 +137,9 @@ export const GeminiCLIOAuthPlugin = async ({
         return {
           apiKey: "",
           async fetch(input, init) {
-            if (!isGenerativeLanguageRequest(input)) {
-              return geminiFetch(input, init);
-            }
-
-            // Ensure auth
-            const latestAuth = await getAuth();
-            if (!isOAuthAuth(latestAuth)) {
-              return geminiFetch(input, init);
-            }
-            let authRecord = resolveCachedAuth(latestAuth);
-            if (accessTokenExpired(authRecord)) {
-              const refreshed = await refreshAccessToken(authRecord, client);
-              if (!refreshed) {
-                return geminiFetch(input, init);
-              }
-              authRecord = refreshed;
-            }
-            if (!authRecord.access) {
-              return geminiFetch(input, init);
-            }
-
-            // ─── Extract user message from the Gemini request ───
-            const body = typeof init?.body === "string" ? init.body : "";
-            const text = extractUserMessageFromRequestBody(body);
-
-            if (!text) {
-              return geminiFetch(input, init);
-            }
-
             try {
-              // Connect to ACP (reuses existing connection)
-              const { client: acp, sessionId } = await ensureAcpConnection();
-
-              // Stream via ACP
-              let collectedText = "";
-              const result = await acp.sendPrompt(sessionId, text, {
-                onChunk: (chunk: string) => {
-                  collectedText += chunk;
-                },
-              });
-
-              // Build HTTP response for Opencode
-              const responseBody = buildOpenaiChunk(
-                result.text || collectedText,
-              );
-              const headers = new Headers({
-                "Content-Type": "text/event-stream",
-                "Cache-Control": "no-cache",
-                Connection: "keep-alive",
-              });
-
-              return new Response(responseBody, {
-                status: 200,
-                statusText: "OK",
-                headers,
-              });
-            } catch (error) {
-              console.error("[Gemini ACP] Prompt failed:", error);
-              // Fallback: use HTTP pipeline
+              return await acpFetch(input, init, getAuth, client);
+            } catch {
               return geminiFetch(input, init);
             }
           },
@@ -241,107 +165,175 @@ export const GeminiCLIOAuthPlugin = async ({
 
 export const GoogleOAuthPlugin = GeminiCLIOAuthPlugin;
 
-// ─── Helpers ─────────────────────────────────────────────────────
+// ─── ACP Fetch Handler ──────────────────────────────────────
 
-function normalizeProviderModelCosts(provider: Provider): void {
-  if (!provider?.models || typeof provider.models !== "object") {
-    return;
+async function acpFetch(
+  input: RequestInfo,
+  init: RequestInit | undefined,
+  getAuth: GetAuth,
+  client: PluginContext["client"],
+): Promise<Response> {
+  if (!isGenerativeLanguageRequest(input)) return geminiFetch(input, init);
+
+  // Auth
+  const authLatest = await getAuth();
+  if (!isOAuthAuth(authLatest)) return geminiFetch(input, init);
+  let ar = resolveCachedAuth(authLatest);
+  if (accessTokenExpired(ar)) {
+    const ref = await refreshAccessToken(ar, client);
+    if (!ref?.access) return geminiFetch(input, init);
+    ar = ref;
   }
-  for (const [modelId, model] of Object.entries(provider.models)) {
-    if (!model || typeof model !== "object") continue;
-    const existingCost = model.cost;
-    const isValidCost =
-      existingCost &&
-      typeof existingCost === "object" &&
-      typeof existingCost.input === "number" &&
-      typeof existingCost.output === "number";
-    const normalizedCost = {
-      input: isValidCost ? existingCost.input : 0,
-      output: isValidCost ? existingCost.output : 0,
-      cache: {
-        read:
-          isValidCost &&
-          typeof existingCost.cache === "object" &&
-          existingCost.cache !== null &&
-          typeof (existingCost.cache as { read?: number }).read === "number"
-            ? (existingCost.cache as { read: number }).read
-            : 0,
-        write:
-          isValidCost &&
-          typeof existingCost.cache === "object" &&
-          existingCost.cache !== null &&
-          typeof (existingCost.cache as { write?: number }).write === "number"
-            ? (existingCost.cache as { write: number }).write
-            : 0,
+
+  // Extract user text from body
+  const raw = typeof init?.body === "string" ? init.body : "";
+  const { userText, systemText } = parseGeminiRequest(raw);
+  if (!userText) return geminiFetch(input, init);
+
+  // ACP call
+  try {
+    const { client: acp, sessionId } = await getAcp();
+    let fullText = "";
+    const result = await acp.sendPrompt(sessionId, userText, {
+      onChunk: (chunk) => {
+        fullText += chunk;
       },
-    };
-    model.cost = normalizedCost;
+      systemPrompt: systemText,
+    });
+
+    const out = result.text || fullText;
+    if (!out) return geminiFetch(input, init);
+
+    return buildSseResponse(out, result);
+  } catch (err) {
+    console.error("[Gemini ACP] Error:", err);
+    resetAcp();
+    return geminiFetch(input, init);
   }
 }
 
-/**
- * Extracts user message text from a Gemini API request body.
- * Handles both wrapped (Code Assist) and unwrapped (direct) formats.
- */
-function extractUserMessageFromRequestBody(body: string): string {
-  if (!body) return "";
+// ─── Response Builder ───────────────────────────────────────
 
+function buildSseResponse(
+  text: string,
+  result: {
+    stopReason?: string;
+    usage?: {
+      totalTokens?: number;
+      promptTokens?: number;
+      completionTokens?: number;
+    };
+  },
+): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      const data = JSON.stringify({
+        candidates: [
+          {
+            content: { parts: [{ text }], role: "model" },
+            finishReason: result.stopReason || "STOP",
+            safetyRatings: [],
+          },
+        ],
+        usageMetadata: result.usage
+          ? {
+              promptTokenCount: result.usage.promptTokens ?? 0,
+              candidatesTokenCount: result.usage.completionTokens ?? 0,
+              totalTokenCount: result.usage.totalTokens ?? 0,
+            }
+          : undefined,
+      });
+      controller.enqueue(encoder.encode(`data: ${data}\n\n`));
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+    },
+  });
+}
+
+// ─── Request Parser ─────────────────────────────────────────
+
+function parseGeminiRequest(body: string): {
+  userText: string;
+  systemText?: string;
+} {
+  if (!body) return { userText: "" };
   try {
     const parsed = JSON.parse(body) as Record<string, unknown>;
+    const req = (parsed.request as Record<string, unknown>) ?? parsed;
+    const contents = req.contents as Array<Record<string, unknown>> | undefined;
+    if (!Array.isArray(contents) || contents.length === 0)
+      return { userText: "" };
 
-    // Wrapped Code Assist format: { project, model, request: { contents: [...] } }
-    const requestData = parsed.request as Record<string, unknown> | undefined;
-    const contents = (requestData?.contents ?? parsed.contents) as
-      | Array<Record<string, unknown>>
-      | undefined;
-
-    if (!Array.isArray(contents) || contents.length === 0) {
-      // If no contents, try to use the body itself
-      return "";
+    // System instruction
+    let systemText: string | undefined;
+    const si = req.systemInstruction as Record<string, unknown> | undefined;
+    if (si?.parts && Array.isArray(si.parts)) {
+      systemText = si.parts
+        .filter(
+          (p: unknown) =>
+            typeof p === "object" && (p as Record<string, unknown>).text,
+        )
+        .map((p: unknown) => (p as Record<string, unknown>).text as string)
+        .join("\n");
     }
 
-    // Collect all user text from contents
-    const textParts: string[] = [];
-    for (const content of contents) {
-      if (!content || typeof content !== "object") continue;
-      const role = content.role as string | undefined;
-      const parts = content.parts as Array<Record<string, unknown>> | undefined;
+    // Last user message
+    let userText = "";
+    for (let i = contents.length - 1; i >= 0; i--) {
+      const c = contents[i];
+      if (!c || typeof c !== "object" || c.role !== "user") continue;
+      const parts = c.parts as Array<Record<string, unknown>> | undefined;
       if (!Array.isArray(parts)) continue;
-
-      for (const part of parts) {
-        if (part?.text && typeof part.text === "string") {
-          textParts.push(part.text);
-        }
+      const texts = parts.filter((p) => p?.text).map((p) => p.text as string);
+      if (texts.length > 0) {
+        userText = texts.join("\n");
+        break;
       }
     }
 
-    return textParts.join("\n");
+    return { userText, systemText };
   } catch {
-    return "";
+    return { userText: "" };
   }
 }
 
-/**
- * Builds a minimal OpenAI-style SSE chunk for streaming responses.
- */
-function buildOpenaiChunk(text: string): string {
-  const lines: string[] = [];
-  for (const char of text) {
-    const payload = JSON.stringify({
-      choices: [
-        {
-          delta: { content: char },
-          index: 0,
-        },
-      ],
-    });
-    lines.push(`data: ${payload}\n`);
+function normalizeProviderModelCosts(provider: Provider): void {
+  if (!provider?.models) return;
+  for (const m of Object.values(provider.models)) {
+    if (!m || typeof m !== "object") continue;
+    const ec = m.cost;
+    const ok =
+      ec &&
+      typeof ec === "object" &&
+      typeof ec.input === "number" &&
+      typeof ec.output === "number";
+    const cacheRead =
+      ok && ec.cache && typeof (ec.cache as { read?: number }).read === "number"
+        ? (ec.cache as { read: number }).read
+        : 0;
+    const cacheWrite =
+      ok &&
+      ec.cache &&
+      typeof (ec.cache as { write?: number }).write === "number"
+        ? (ec.cache as { write: number }).write
+        : 0;
+    m.cost = {
+      input: ok ? ec.input : 0,
+      output: ok ? ec.output : 0,
+      cache: { read: cacheRead, write: cacheWrite },
+    };
   }
-  lines.push("data: [DONE]\n");
-  return lines.join("");
 }
 
-// Backward compatibility re-exports
 export {
   toRequestUrlString,
   injectResponseIdFromTrace,

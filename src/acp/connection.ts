@@ -23,7 +23,9 @@ export interface AcpConnection {
   /** Register a handler for notifications from the CLI. */
   onNotification(handler: (method: string, params: unknown) => void): void;
   /** Register a handler for inbound requests from the CLI (client methods). */
-  onRequest(handler: (method: string, params: unknown) => Promise<unknown>): void;
+  onRequest(
+    handler: (method: string, params: unknown) => Promise<unknown>,
+  ): void;
   /** Cleanly shut down the subprocess. */
   close(): Promise<void>;
   /** Check if connection is active. */
@@ -168,7 +170,11 @@ export async function connectAcp(): Promise<AcpConnection> {
           );
         }, ACP_REQUEST_TIMEOUT_MS);
 
-        pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer });
+        pending.set(id, {
+          resolve: resolve as (v: unknown) => void,
+          reject,
+          timer,
+        });
 
         writeMessage(proc, {
           jsonrpc: "2.0",
@@ -207,7 +213,8 @@ export async function connectAcp(): Promise<AcpConnection> {
     },
 
     get isConnected(): boolean {
-      return !closed && !!proc.exitCode;
+      // proc.exitCode is null when the process is running
+      return !closed && proc.exitCode === null;
     },
   };
 
@@ -221,9 +228,7 @@ async function waitForProcessReady(proc: ChildProcess): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < ACP_CONNECT_TIMEOUT_MS) {
     if (proc.exitCode !== null) {
-      throw new Error(
-        `Gemini CLI exited prematurely (code: ${proc.exitCode})`,
-      );
+      throw new Error(`Gemini CLI exited prematurely (code: ${proc.exitCode})`);
     }
     if (proc.stdout?.readable) {
       return;
@@ -241,9 +246,7 @@ function sleep(ms: number): Promise<void> {
 
 // ─── JSON-RPC type guards ────────────────────────────────────────
 
-function isResponse(
-  msg: unknown,
-): msg is JsonRpcResponse {
+function isResponse(msg: unknown): msg is JsonRpcResponse {
   return (
     typeof msg === "object" &&
     msg !== null &&
@@ -253,9 +256,7 @@ function isResponse(
   );
 }
 
-function isNotification(
-  msg: unknown,
-): msg is JsonRpcNotification {
+function isNotification(msg: unknown): msg is JsonRpcNotification {
   return (
     typeof msg === "object" &&
     msg !== null &&
@@ -266,9 +267,7 @@ function isNotification(
   );
 }
 
-function isRequest(
-  msg: unknown,
-): msg is JsonRpcRequest {
+function isRequest(msg: unknown): msg is JsonRpcRequest {
   return (
     typeof msg === "object" &&
     msg !== null &&
