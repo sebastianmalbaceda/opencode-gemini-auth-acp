@@ -27,7 +27,6 @@ export {
   getGeminiOAuthCredsPath,
   getGeminiSettingsPath,
   getGeminiCliPackagePath,
-  _setTestCredentialOverride,
   type GeminiCliCredentials,
   type GeminiOAuthAppCredentials,
   credentialInternals,

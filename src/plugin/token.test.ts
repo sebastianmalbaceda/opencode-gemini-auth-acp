@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 
 import { GEMINI_PROVIDER_ID } from "../constants";
-import { _setTestCredentialOverride } from "../gemini-cli";
 import { refreshAccessToken } from "./token";
 import type { OAuthAuthDetails, PluginClient } from "./types";
 
@@ -27,25 +26,14 @@ function createClient() {
 describe("refreshAccessToken", () => {
   beforeEach(() => {
     mock.restore();
-    // Inject mock credentials so token refresh works in test environment
-    _setTestCredentialOverride({
-      clientId: "test-client-id.apps.googleusercontent.com",
-      clientSecret: "test-client-secret",
-      redirectUri: "http://localhost:8085/oauth2callback",
-    });
-    (globalThis as { setTimeout: typeof setTimeout }).setTimeout = ((
-      fn: (...args: any[]) => void,
-    ) => {
+    (globalThis as { setTimeout: typeof setTimeout }).setTimeout = ((fn: (...args: any[]) => void) => {
       fn();
       return 0 as unknown as ReturnType<typeof setTimeout>;
     }) as typeof setTimeout;
   });
 
   afterEach(() => {
-    // Clear mock credentials
-    _setTestCredentialOverride(undefined);
-    (globalThis as { setTimeout: typeof setTimeout }).setTimeout =
-      originalSetTimeout;
+    (globalThis as { setTimeout: typeof setTimeout }).setTimeout = originalSetTimeout;
   });
 
   it("updates the caller but skips persisting when refresh token is unchanged", async () => {
@@ -59,8 +47,7 @@ describe("refreshAccessToken", () => {
         { status: 200 },
       );
     });
-    (globalThis as { fetch: typeof fetch }).fetch =
-      fetchMock as unknown as typeof fetch;
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const result = await refreshAccessToken(baseAuth, client);
 
@@ -80,8 +67,7 @@ describe("refreshAccessToken", () => {
         { status: 200 },
       );
     });
-    (globalThis as { fetch: typeof fetch }).fetch =
-      fetchMock as unknown as typeof fetch;
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const result = await refreshAccessToken(baseAuth, client);
 
@@ -113,8 +99,7 @@ describe("refreshAccessToken", () => {
         { status: 200 },
       );
     });
-    (globalThis as { fetch: typeof fetch }).fetch =
-      fetchMock as unknown as typeof fetch;
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const first = refreshAccessToken(baseAuth, client);
     const second = refreshAccessToken(baseAuth, client);
@@ -144,8 +129,7 @@ describe("refreshAccessToken", () => {
         { status: 200 },
       );
     });
-    (globalThis as { fetch: typeof fetch }).fetch =
-      fetchMock as unknown as typeof fetch;
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const result = await refreshAccessToken(baseAuth, client);
 
@@ -167,8 +151,7 @@ describe("refreshAccessToken", () => {
         { status: 200 },
       );
     });
-    (globalThis as { fetch: typeof fetch }).fetch =
-      fetchMock as unknown as typeof fetch;
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const result = await refreshAccessToken(baseAuth, client);
 
