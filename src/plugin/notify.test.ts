@@ -45,10 +45,18 @@ describe("maybeShowGeminiCapacityToast", () => {
 
   it("shows toast for MODEL_CAPACITY_EXHAUSTED", async () => {
     const showToast = mock(async (_input: unknown) => true);
-    const client = { auth: { set: async () => {} }, tui: { showToast } } as PluginClient;
+    const client = {
+      auth: { set: async () => {} },
+      tui: { showToast },
+    } as PluginClient;
     const response = makeQuota429("MODEL_CAPACITY_EXHAUSTED");
 
-    await maybeShowGeminiCapacityToast(client, response, "project-1", "gemini-3-flash-preview");
+    await maybeShowGeminiCapacityToast(
+      client,
+      response,
+      "project-1",
+      "gemini-3-flash-preview",
+    );
 
     expect(showToast.mock.calls.length).toBe(1);
     const firstCall = showToast.mock.calls.at(0);
@@ -65,17 +73,28 @@ describe("maybeShowGeminiCapacityToast", () => {
 
   it("does not show toast for non-capacity 429 reasons", async () => {
     const showToast = mock(async (_input: unknown) => true);
-    const client = { auth: { set: async () => {} }, tui: { showToast } } as PluginClient;
+    const client = {
+      auth: { set: async () => {} },
+      tui: { showToast },
+    } as PluginClient;
     const response = makeQuota429("RATE_LIMIT_EXCEEDED");
 
-    await maybeShowGeminiCapacityToast(client, response, "project-1", "gemini-3-flash-preview");
+    await maybeShowGeminiCapacityToast(
+      client,
+      response,
+      "project-1",
+      "gemini-3-flash-preview",
+    );
 
     expect(showToast.mock.calls.length).toBe(0);
   });
 
   it("dedupes toasts within cooldown window", async () => {
     const showToast = mock(async (_input: unknown) => true);
-    const client = { auth: { set: async () => {} }, tui: { showToast } } as PluginClient;
+    const client = {
+      auth: { set: async () => {} },
+      tui: { showToast },
+    } as PluginClient;
 
     await maybeShowGeminiCapacityToast(
       client,
@@ -114,7 +133,10 @@ describe("maybeShowGeminiTestToast", () => {
   it("does not show test toast when flag is not enabled", async () => {
     const { maybeShowGeminiTestToast } = await import("./notify");
     const showToast = mock(async (_input: unknown) => true);
-    const client = { auth: { set: async () => {} }, tui: { showToast } } as PluginClient;
+    const client = {
+      auth: { set: async () => {} },
+      tui: { showToast },
+    } as PluginClient;
 
     await maybeShowGeminiTestToast(client, "project-1");
 
@@ -125,7 +147,10 @@ describe("maybeShowGeminiTestToast", () => {
     process.env.OPENCODE_GEMINI_TEST_TOAST = "1";
     const { maybeShowGeminiTestToast } = await import("./notify");
     const showToast = mock(async (_input: unknown) => true);
-    const client = { auth: { set: async () => {} }, tui: { showToast } } as PluginClient;
+    const client = {
+      auth: { set: async () => {} },
+      tui: { showToast },
+    } as PluginClient;
 
     await maybeShowGeminiTestToast(client, "project-1");
     await maybeShowGeminiTestToast(client, "project-1");
@@ -135,7 +160,7 @@ describe("maybeShowGeminiTestToast", () => {
     expect(firstCall?.[0]).toEqual({
       body: {
         title: "Gemini Toast Test",
-        message: "Temporary test toast from opencode-gemini-auth.",
+        message: "Temporary test toast from opencode-gemini-safe-auth.",
         variant: "info",
         duration: 5000,
       },

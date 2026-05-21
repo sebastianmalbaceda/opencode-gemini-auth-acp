@@ -35,7 +35,10 @@ export async function maybeShowGeminiCapacityToast(
   if (cooldownUntil > now) {
     return;
   }
-  modelCapacityToastCooldownByKey.set(toastKey, now + MODEL_CAPACITY_TOAST_COOLDOWN_MS);
+  modelCapacityToastCooldownByKey.set(
+    toastKey,
+    now + MODEL_CAPACITY_TOAST_COOLDOWN_MS,
+  );
 
   await client.tui.showToast({
     body: {
@@ -46,7 +49,9 @@ export async function maybeShowGeminiCapacityToast(
     },
   });
   if (isGeminiDebugEnabled()) {
-    logGeminiDebugMessage(`Toast: emitted capacity warning for model=${model} project=${projectId}`);
+    logGeminiDebugMessage(
+      `Toast: emitted capacity warning for model=${model} project=${projectId}`,
+    );
   }
 }
 
@@ -71,7 +76,7 @@ export async function maybeShowGeminiTestToast(
   await client.tui.showToast({
     body: {
       title: "Gemini Toast Test",
-      message: "Temporary test toast from opencode-gemini-auth.",
+      message: "Temporary test toast from opencode-gemini-safe-auth.",
       variant: "info",
       duration: 5000,
     },

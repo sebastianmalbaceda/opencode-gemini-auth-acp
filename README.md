@@ -1,7 +1,7 @@
 # Gemini OAuth Plugin for Opencode
 
-![License](https://img.shields.io/npm/l/opencode-gemini-auth)
-![Version](https://img.shields.io/npm/v/opencode-gemini-auth)
+![License](https://img.shields.io/npm/l/opencode-gemini-safe-auth)
+![Version](https://img.shields.io/npm/v/opencode-gemini-safe-auth)
 
 > [!IMPORTANT]
 > This plugin bridges Opencode with the **official Gemini CLI** (`@google/gemini-cli`).
@@ -41,7 +41,7 @@ Add the plugin to your Opencode configuration file
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-gemini-auth@latest"]
+  "plugin": ["opencode-gemini-safe-auth@latest"]
 }
 ```
 
@@ -337,7 +337,7 @@ you must clear the cached plugin:
 
 ```bash
 # Clear the specific plugin cache
-rm -rf ~/.cache/opencode/node_modules/opencode-gemini-auth
+rm -rf ~/.cache/opencode/node_modules/opencode-gemini-safe-auth
 
 # Run Opencode to trigger a fresh install
 opencode
@@ -350,8 +350,8 @@ To develop on this plugin locally:
 1. **Clone**:
 
    ```bash
-   git clone https://github.com/jenslys/opencode-gemini-auth.git
-   cd opencode-gemini-auth
+   git clone https://github.com/sebastianmalbaceda/opencode-gemini-safe-auth.git
+   cd opencode-gemini-safe-auth
    bun install
    ```
 
@@ -361,7 +361,7 @@ To develop on this plugin locally:
 
    ```json
    {
-     "plugin": ["file:///absolute/path/to/opencode-gemini-auth"]
+     "plugin": ["file:///absolute/path/to/opencode-gemini-safe-auth"]
    }
    ```
 
