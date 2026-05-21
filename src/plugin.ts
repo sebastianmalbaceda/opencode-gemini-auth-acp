@@ -1,34 +1,33 @@
+/**
+ * Gemini CLI ACP Plugin for Opencode.
+ *
+ * This plugin integrates the Gemini CLI via ACP (Agent Communication Protocol),
+ * replacing the previous direct HTTP calls to internal Code Assist APIs.
+ *
+ * Architecture:
+ *   Opencode → Plugin → ACP Client (JSON-RPC over stdio) → gemini --acp → Google APIs
+ *
+ * The Gemini CLI handles all authentication and API calls. The plugin
+ * simply bridges Opencode's requests to the ACP protocol and vice versa.
+ */
+
 import { GEMINI_PROVIDER_ID } from "./constants";
 import { isGeminiCliInstalled, isGeminiAuthenticated } from "./gemini-cli";
 import { geminiFetch } from "./fetch";
 import { createOAuthAuthorizeMethod } from "./plugin/oauth-authorize";
 import { accessTokenExpired, isOAuthAuth } from "./plugin/auth";
 import { resolveCachedAuth } from "./plugin/cache";
-import { ensureProjectContext, retrieveUserQuota } from "./plugin/project";
+import { retrieveUserQuota } from "./plugin/project";
 import { createGeminiQuotaTool, GEMINI_QUOTA_TOOL_NAME } from "./plugin/quota";
-import {
-  isGeminiDebugEnabled,
-  logGeminiDebugMessage,
-  startGeminiDebugRequest,
-} from "./plugin/debug";
-import {
-  maybeShowGeminiCapacityToast,
-  maybeShowGeminiTestToast,
-} from "./plugin/notify";
+import { isGeminiDebugEnabled, logGeminiDebugMessage } from "./plugin/debug";
 import {
   resolveConfiguredProjectId,
   resolveConfiguredProjectIdFromClient,
   resolveConfiguredProjectIdFromConfig,
 } from "./plugin/provider";
-import {
-  isGenerativeLanguageRequest,
-  parseGenerativeLanguageRequest,
-  prepareGeminiRequest,
-  type ThinkingConfigDefaults,
-  transformGeminiResponse,
-} from "./plugin/request";
-import { fetchWithRetry } from "./plugin/retry";
+import { isGenerativeLanguageRequest } from "./plugin/request/shared";
 import { refreshAccessToken } from "./plugin/token";
+import { AcpClient } from "./acp";
 import type {
   GetAuth,
   LoaderResult,
@@ -47,23 +46,20 @@ Do not call other tools.
 `;
 let latestGeminiAuthResolver: GetAuth | undefined;
 let latestGeminiConfiguredProjectId: string | undefined;
-let latestGeminiUserAgentModel: string | undefined;
 
 /**
- * Registers the Gemini provider for Opencode, handling auth via the Gemini CLI,
- * request rewriting, debug logging, and response normalization.
+ * Registers the Gemini ACP provider for Opencode.
  */
 export const GeminiCLIOAuthPlugin = async ({
   client,
 }: PluginContext): Promise<PluginResult> => {
-  // Fast check for Gemini CLI availability — synchronous file checks only, no subprocess
+  // Fast CLI detection
   const cliInstalled = isGeminiCliInstalled();
   const cliAuthenticated = cliInstalled && isGeminiAuthenticated();
 
   if (!cliInstalled) {
     console.warn(
       "\n[Gemini Plugin] The Gemini CLI is not installed. " +
-        "This plugin requires the official Gemini CLI to handle authentication.\n" +
         "Install it globally with: npm install -g @google/gemini-cli\n" +
         "Then authenticate with: gemini auth login\n" +
         "After that, restart Opencode.\n",
@@ -76,6 +72,39 @@ export const GeminiCLIOAuthPlugin = async ({
     );
   } else if (isGeminiDebugEnabled()) {
     logGeminiDebugMessage("Gemini CLI detected and authenticated.");
+  }
+
+  // ─── ACP client (lazy init) ───────────────────────────────
+  let acpClient: AcpClient | null = null;
+  let acpSessionId: string | null = null;
+  let acpInitialized = false;
+
+  async function ensureAcpConnection(): Promise<{
+    client: AcpClient;
+    sessionId: string;
+  }> {
+    if (acpClient && acpSessionId && acpClient.isConnected) {
+      return { client: acpClient, sessionId: acpSessionId };
+    }
+
+    if (acpClient) {
+      await acpClient.destroy().catch(() => {});
+    }
+
+    logGeminiDebugMessage("Starting ACP connection to gemini --acp...");
+    const client_ = await AcpClient.create();
+    const info = await client_.initialize();
+    logGeminiDebugMessage(
+      `ACP connected: ${info.agentInfo.name} v${info.agentInfo.version}`,
+    );
+    await client_.authenticate();
+    const sessionId = await client_.createSession(process.cwd());
+    logGeminiDebugMessage(`ACP session created: ${sessionId}`);
+
+    acpClient = client_;
+    acpSessionId = sessionId;
+    acpInitialized = true;
+    return { client: client_, sessionId };
   }
 
   const resolveLatestConfiguredProjectId = async (
@@ -107,7 +136,7 @@ export const GeminiCLIOAuthPlugin = async ({
         client,
         getAuthResolver: () => latestGeminiAuthResolver,
         getConfiguredProjectId: () => latestGeminiConfiguredProjectId,
-        getUserAgentModel: () => latestGeminiUserAgentModel,
+        getUserAgentModel: () => undefined,
       }),
     },
     auth: {
@@ -124,7 +153,6 @@ export const GeminiCLIOAuthPlugin = async ({
 
         await resolveLatestConfiguredProjectId(provider);
         normalizeProviderModelCosts(provider);
-        const thinkingConfigDefaults = resolveThinkingConfigDefaults(provider);
 
         return {
           apiKey: "",
@@ -133,11 +161,11 @@ export const GeminiCLIOAuthPlugin = async ({
               return geminiFetch(input, init);
             }
 
+            // Ensure auth
             const latestAuth = await getAuth();
             if (!isOAuthAuth(latestAuth)) {
               return geminiFetch(input, init);
             }
-
             let authRecord = resolveCachedAuth(latestAuth);
             if (accessTokenExpired(authRecord)) {
               const refreshed = await refreshAccessToken(authRecord, client);
@@ -146,70 +174,50 @@ export const GeminiCLIOAuthPlugin = async ({
               }
               authRecord = refreshed;
             }
-
             if (!authRecord.access) {
               return geminiFetch(input, init);
             }
 
-            const configuredProjectId =
-              await resolveLatestConfiguredProjectId(provider);
-            const requestTarget = parseGenerativeLanguageRequest(input);
-            const requestUserAgentModel = requestTarget?.effectiveModel;
-            if (requestUserAgentModel) {
-              latestGeminiUserAgentModel = requestUserAgentModel;
-            }
-            const projectContext = await ensureProjectContextOrThrow(
-              authRecord,
-              client,
-              configuredProjectId,
-              requestUserAgentModel,
-            );
-            await maybeShowGeminiTestToast(
-              client,
-              projectContext.effectiveProjectId,
-            );
-            await maybeLogAvailableQuotaModels(
-              authRecord.access,
-              projectContext.effectiveProjectId,
-              requestUserAgentModel,
-            );
-            const transformed = prepareGeminiRequest(
-              input,
-              init,
-              authRecord.access,
-              projectContext.effectiveProjectId,
-              thinkingConfigDefaults,
-            );
-            const debugContext = startGeminiDebugRequest({
-              originalUrl: toUrlString(input),
-              resolvedUrl: toUrlString(transformed.request),
-              method: transformed.init.method,
-              headers: transformed.init.headers,
-              body: transformed.init.body,
-              streaming: transformed.streaming,
-              projectId: projectContext.effectiveProjectId,
-            });
+            // ─── Extract user message from the Gemini request ───
+            const body = typeof init?.body === "string" ? init.body : "";
+            const text = extractUserMessageFromRequestBody(body);
 
-            /**
-             * Retry transport/429 failures while preserving the requested model.
-             * We intentionally do not auto-downgrade model tiers to avoid misleading users.
-             */
-            const response = await fetchWithRetry(
-              transformed.request,
-              transformed.init,
-            );
-            await maybeShowGeminiCapacityToast(
-              client,
-              response,
-              projectContext.effectiveProjectId,
-              transformed.requestedModel,
-            );
-            return transformGeminiResponse(
-              response,
-              transformed.streaming,
-              debugContext,
-              transformed.requestedModel,
-            );
+            if (!text) {
+              return geminiFetch(input, init);
+            }
+
+            try {
+              // Connect to ACP (reuses existing connection)
+              const { client: acp, sessionId } = await ensureAcpConnection();
+
+              // Stream via ACP
+              let collectedText = "";
+              const result = await acp.sendPrompt(sessionId, text, {
+                onChunk: (chunk: string) => {
+                  collectedText += chunk;
+                },
+              });
+
+              // Build HTTP response for Opencode
+              const responseBody = buildOpenaiChunk(
+                result.text || collectedText,
+              );
+              const headers = new Headers({
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                Connection: "keep-alive",
+              });
+
+              return new Response(responseBody, {
+                status: 200,
+                statusText: "OK",
+                headers,
+              });
+            } catch (error) {
+              console.error("[Gemini ACP] Prompt failed:", error);
+              // Fallback: use HTTP pipeline
+              return geminiFetch(input, init);
+            }
           },
         };
       },
@@ -219,7 +227,6 @@ export const GeminiCLIOAuthPlugin = async ({
           type: "oauth",
           authorize: createOAuthAuthorizeMethod({
             getConfiguredProjectId: () => resolveLatestConfiguredProjectId(),
-            getUserAgentModel: () => latestGeminiUserAgentModel,
           }),
         },
         {
@@ -233,24 +240,21 @@ export const GeminiCLIOAuthPlugin = async ({
 };
 
 export const GoogleOAuthPlugin = GeminiCLIOAuthPlugin;
-const loggedQuotaModelsByProject = new Set<string>();
+
+// ─── Helpers ─────────────────────────────────────────────────────
 
 function normalizeProviderModelCosts(provider: Provider): void {
   if (!provider?.models || typeof provider.models !== "object") {
     return;
   }
   for (const [modelId, model] of Object.entries(provider.models)) {
-    if (!model || typeof model !== "object") {
-      continue;
-    }
-    // Preserve existing cost fields while ensuring required fields exist
+    if (!model || typeof model !== "object") continue;
     const existingCost = model.cost;
     const isValidCost =
       existingCost &&
       typeof existingCost === "object" &&
       typeof existingCost.input === "number" &&
       typeof existingCost.output === "number";
-    // Build full OpenCode cost shape including cache fields
     const normalizedCost = {
       input: isValidCost ? existingCost.input : 0,
       output: isValidCost ? existingCost.output : 0,
@@ -275,113 +279,70 @@ function normalizeProviderModelCosts(provider: Provider): void {
   }
 }
 
-function resolveThinkingConfigDefaults(
-  provider: Provider,
-): ThinkingConfigDefaults | undefined {
-  const providerOptions =
-    provider && typeof provider === "object"
-      ? ((provider as { options?: Record<string, unknown> }).options ??
-        undefined)
-      : undefined;
-  const providerThinkingConfig = providerOptions?.thinkingConfig;
+/**
+ * Extracts user message text from a Gemini API request body.
+ * Handles both wrapped (Code Assist) and unwrapped (direct) formats.
+ */
+function extractUserMessageFromRequestBody(body: string): string {
+  if (!body) return "";
 
-  const modelThinkingConfigByModel: Record<string, unknown> = {};
-  for (const [modelId, model] of Object.entries(provider.models ?? {})) {
-    if (!model || typeof model !== "object") {
-      continue;
-    }
-    const modelOptions = (model as { options?: Record<string, unknown> })
-      .options;
-    if (
-      modelOptions &&
-      typeof modelOptions === "object" &&
-      "thinkingConfig" in modelOptions
-    ) {
-      modelThinkingConfigByModel[modelId] = modelOptions.thinkingConfig;
-    }
-  }
-
-  if (
-    providerThinkingConfig === undefined &&
-    Object.keys(modelThinkingConfigByModel).length === 0
-  ) {
-    return undefined;
-  }
-
-  return {
-    provider: providerThinkingConfig,
-    models: modelThinkingConfigByModel,
-  };
-}
-
-async function ensureProjectContextOrThrow(
-  authRecord: OAuthAuthDetails,
-  client: PluginClient,
-  configuredProjectId?: string,
-  userAgentModel?: string,
-) {
   try {
-    return await ensureProjectContext(
-      authRecord,
-      client,
-      configuredProjectId,
-      userAgentModel,
-    );
-  } catch (error) {
-    if (error instanceof Error) {
-      console.error(error.message);
-    }
-    throw error;
-  }
-}
+    const parsed = JSON.parse(body) as Record<string, unknown>;
 
-function toUrlString(value: RequestInfo): string {
-  if (typeof value === "string") {
-    return value;
+    // Wrapped Code Assist format: { project, model, request: { contents: [...] } }
+    const requestData = parsed.request as Record<string, unknown> | undefined;
+    const contents = (requestData?.contents ?? parsed.contents) as
+      | Array<Record<string, unknown>>
+      | undefined;
+
+    if (!Array.isArray(contents) || contents.length === 0) {
+      // If no contents, try to use the body itself
+      return "";
+    }
+
+    // Collect all user text from contents
+    const textParts: string[] = [];
+    for (const content of contents) {
+      if (!content || typeof content !== "object") continue;
+      const role = content.role as string | undefined;
+      const parts = content.parts as Array<Record<string, unknown>> | undefined;
+      if (!Array.isArray(parts)) continue;
+
+      for (const part of parts) {
+        if (part?.text && typeof part.text === "string") {
+          textParts.push(part.text);
+        }
+      }
+    }
+
+    return textParts.join("\n");
+  } catch {
+    return "";
   }
-  const candidate = (value as Request).url;
-  if (candidate) {
-    return candidate;
-  }
-  return value.toString();
 }
 
 /**
- * Debug-only, best-effort model visibility log from Code Assist quota buckets.
+ * Builds a minimal OpenAI-style SSE chunk for streaming responses.
  */
-async function maybeLogAvailableQuotaModels(
-  accessToken: string,
-  projectId: string,
-  userAgentModel?: string,
-): Promise<void> {
-  if (!isGeminiDebugEnabled() || !projectId) {
-    return;
+function buildOpenaiChunk(text: string): string {
+  const lines: string[] = [];
+  for (const char of text) {
+    const payload = JSON.stringify({
+      choices: [
+        {
+          delta: { content: char },
+          index: 0,
+        },
+      ],
+    });
+    lines.push(`data: ${payload}\n`);
   }
-
-  if (loggedQuotaModelsByProject.has(projectId)) {
-    return;
-  }
-  loggedQuotaModelsByProject.add(projectId);
-
-  const quota = await retrieveUserQuota(accessToken, projectId, userAgentModel);
-  if (!quota?.buckets) {
-    logGeminiDebugMessage(
-      `Code Assist quota model lookup returned no buckets for project: ${projectId}`,
-    );
-    return;
-  }
-
-  const modelIds = [
-    ...new Set(quota.buckets.map((bucket) => bucket.modelId).filter(Boolean)),
-  ];
-  if (modelIds.length === 0) {
-    logGeminiDebugMessage(
-      `Code Assist quota buckets contained no model IDs for project: ${projectId}`,
-    );
-    return;
-  }
-
-  logGeminiDebugMessage(
-    `Code Assist models visible via quota buckets (${projectId}): ${modelIds.join(", ")}`,
-  );
+  lines.push("data: [DONE]\n");
+  return lines.join("");
 }
+
+// Backward compatibility re-exports
+export {
+  toRequestUrlString,
+  injectResponseIdFromTrace,
+} from "./plugin/request/shared";

@@ -37,14 +37,10 @@ export class AcpClient {
   private conn: AcpConnection;
   private sessionId: string | null = null;
   private collectedText = "";
-  private promptResolve: ((result: PromptResponse) => void) | null = null;
-  private promptReject: ((error: Error) => void) | null = null;
-  private promptTimer: ReturnType<typeof setTimeout> | null = null;
-  private promptTimeoutMs: number;
+  private chunkCallback: ((text: string) => void) | null = null;
 
-  private constructor(conn: AcpConnection, config?: AcpClientConfig) {
+  private constructor(conn: AcpConnection, _config?: AcpClientConfig) {
     this.conn = conn;
-    this.promptTimeoutMs = config?.promptTimeoutMs ?? 120_000;
 
     // Handle notifications (streaming content from CLI)
     this.conn.onNotification((method: string, params: unknown) => {
@@ -128,25 +124,21 @@ export class AcpClient {
       systemPrompt?: string;
     },
   ): Promise<PromptResponse> {
-    // Build content blocks for the prompt
     const blocks: Array<{ type: "text"; text: string }> = [];
-
     if (options?.systemPrompt) {
       blocks.push({ type: "text", text: options.systemPrompt });
     }
     blocks.push({ type: "text", text: message });
 
-    // Set up streaming
     this.collectedText = "";
-    const onChunk = options?.onChunk;
+    this.chunkCallback = options?.onChunk ?? null;
 
     const result = await this.conn.request<PromptResult>(
       AGENT_METHODS.sessionPrompt,
-      {
-        sessionId,
-        prompt: blocks,
-      },
+      { sessionId, prompt: blocks },
     );
+
+    this.chunkCallback = null;
 
     return {
       text: this.collectedText,
@@ -168,6 +160,7 @@ export class AcpClient {
         if (content?.type === "text") {
           const text = (content as TextContent).text;
           this.collectedText += text;
+          this.chunkCallback?.(text);
         }
         break;
       }
