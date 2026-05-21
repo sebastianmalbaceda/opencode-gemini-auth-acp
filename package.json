@@ -1,7 +1,7 @@
 {
   "name": "opencode-gemini-safe-auth",
   "version": "1.4.15",
-  "author": "jenslys",
+  "author": "Sebastian Malbaceda",
   "repository": "https://github.com/sebastianmalbaceda/opencode-gemini-safe-auth",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
